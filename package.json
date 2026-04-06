@@ -1,0 +1,30 @@
+{
+  "name": "agenda",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @agenda/client dev",
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r test",
+    "lint": "oxlint --fix",
+    "format": "oxfmt --write",
+    "check": "pnpm -r check && oxlint",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "oxfmt": "^0.43.0",
+    "oxlint": "^1.58.0",
+    "typescript": "^6.0.2"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "oxlint --fix",
+      "oxfmt --write"
+    ],
+    "*.{json,css,md,html}": [
+      "oxfmt --write"
+    ]
+  }
+}
