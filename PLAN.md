@@ -2,21 +2,29 @@
 
 **Sovereign calendar on the Living Web, backed by AD4M.**
 
-This document breaks each implementation layer into folder structure, interfaces, and specification-level test descriptions using MUST/MAY/SHOULD language. Once approved, we implement layer by layer.
+---
+
+## Design Principles
+
+**Data-driven and declarative.** The shape definitions are the single source of truth. Types, validation, queries, ICS mapping, form generation, and governance rules are all *derived* from the shapes — never duplicated in parallel code. If you change a shape, everything downstream updates automatically.
+
+1. **Shapes are the schema.** The Living Web shape definitions (`EVENT_SHAPE`, `MEETING_REQUEST_SHAPE`, `FREE_BUSY_SHAPE`) declare every property, its type, cardinality, and predicate path. Application-level TypeScript types are *generated* from shapes, not maintained by hand.
+2. **Mappings are data.** ICS field mapping, form field rendering hints, predicate URIs — all declared as lookup tables keyed by shape property name. No per-field functions.
+3. **Queries are derived.** Date-range queries, instance lookups, and calendar filtering are composed from shape metadata + parameters. Not hand-written SPARQL per use case.
+4. **UI is shape-driven.** Event detail forms are rendered by iterating shape properties, not by hand-coding a field per property. Rendering hints (input type, display order, grouping) are annotations on the shape, not in component code.
+5. **Operations are generic.** `createInstance`, `updateInstance`, `deleteInstance` work on *any* shape. Calendar-specific logic (defaults, validation rules like endDate > startDate) is expressed as declarative rules attached to the shape, not as method bodies.
+6. **Pipelines, not procedures.** Data flows through declarative transformation pipelines: `shape → query → graph → instances → expand recurrences → filter visible calendars → render`. Each stage is a pure function of its inputs.
 
 ---
 
 ## Dependencies
 
-| Package | Purpose | Version |
-|---------|---------|---------|
-| `@living-web/ad4m-polyfill` | `navigator.graph` + `navigator.credentials` backed by AD4M executor | `file:../../living-web-ad4m-polyfill` (local) |
-| `solid-js` | UI framework | latest |
-| `tailwindcss` | Styling | 4.x |
-| `ical.js` | ICS parsing/generation (VEVENT, RRULE, VALARM) | latest |
-| `@solid-primitives/scheduled` | Debounced reactivity helpers | latest |
-
-The AD4M polyfill provides the full `navigator.graph` API including `PersonalGraph`, `SharedGraph`, shapes, identity, and governance. Agenda writes against the neutral Living Web API — it does not import AD4M types directly.
+| Package | Purpose |
+|---------|---------|
+| `@living-web/ad4m-polyfill` | `navigator.graph` + `navigator.credentials` backed by AD4M executor |
+| `solid-js` | Reactive UI framework |
+| `tailwindcss` | Styling |
+| `ical.js` | ICS parsing/generation (VEVENT, RRULE, VALARM) |
 
 ---
 
@@ -27,66 +35,84 @@ packages/client/
 ├── src/
 │   ├── index.tsx                          # App mount
 │   ├── index.css                          # Tailwind + base styles
-│   ├── App.tsx                            # Root: bootstrap graph, render shell
+│   ├── App.tsx                            # Root: bootstrap graph, provide context
 │   │
-│   ├── lib/                               # Layer 0 — Data Foundation
-│   │   ├── types.ts                       # All domain types (CalendarEvent, MeetingRequest, FreeBusy, etc.)
-│   │   ├── schemas.ts                     # Shape definitions (JSON) + schema constants
-│   │   ├── calendar-store.ts              # Graph bootstrap, shape registration, CRUD operations
-│   │   ├── query.ts                       # Date-range queries, instance resolution, SPARQL helpers
-│   │   ├── ics.ts                         # ICS ↔ Event shape mapping (import/export)
-│   │   ├── rrule.ts                       # RRULE parsing + occurrence expansion
-│   │   └── predicates.ts                  # URI constants for schema:// and agenda:// predicates
+│   ├── data/                              # Layer 0 — Declarative Data Foundation
+│   │   ├── shapes/                        # Shape definitions (the single source of truth)
+│   │   │   ├── event.ts                   # EVENT_SHAPE definition + annotations
+│   │   │   ├── meeting-request.ts         # MEETING_REQUEST_SHAPE definition + annotations
+│   │   │   ├── freebusy.ts               # FREE_BUSY_SHAPE definition + annotations
+│   │   │   ├── calendar-meta.ts           # CALENDAR_META_SHAPE definition + annotations
+│   │   │   └── index.ts                   # Shape registry (all shapes, lookup by name)
+│   │   │
+│   │   ├── engine/                        # Generic, shape-agnostic graph operations
+│   │   │   ├── graph-context.ts           # Bootstrap graph, register shapes, provide to app
+│   │   │   ├── instance-ops.ts            # Generic CRUD: create/get/update/delete any shape instance
+│   │   │   ├── query-builder.ts           # Build queries from shape metadata + filter params
+│   │   │   └── subscriptions.ts           # Generic event listeners on graph changes
+│   │   │
+│   │   ├── derivations/                   # Shape-derived utilities (all take shape as input)
+│   │   │   ├── type-gen.ts                # Derive TypeScript types/validators from shape properties
+│   │   │   ├── defaults.ts                # Declarative default-value rules per shape
+│   │   │   ├── validation-rules.ts        # Declarative validation rules (e.g. endDate > startDate)
+│   │   │   └── ics-mapping.ts             # ICS ↔ shape field mapping table
+│   │   │
+│   │   ├── transforms/                    # Pure data transformation pipelines
+│   │   │   ├── ics.ts                     # ICS import/export (driven by ics-mapping table)
+│   │   │   ├── rrule.ts                   # RRULE parsing + occurrence expansion
+│   │   │   ├── freebusy-gen.ts            # Events → FreeBusy slots (pure projection)
+│   │   │   └── slot-finder.ts             # FreeBusy windows → mutual free slots
+│   │   │
+│   │   └── pipelines/                     # Composed query + transform chains
+│   │       ├── visible-events.ts          # shape → query → instances → expand rrule → filter calendars
+│   │       └── availability.ts            # events → freebusy → publish / overlay
 │   │
 │   ├── ui/                                # Layer 1 — Personal Calendar UI
-│   │   ├── Shell.tsx                      # App shell: sidebar + main area + header
-│   │   ├── Header.tsx                     # Navigation: view toggle, today button, date range label
-│   │   ├── Sidebar.tsx                    # Calendar list, toggle visibility, create calendar
+│   │   ├── Shell.tsx                      # App shell: sidebar + main + header
+│   │   ├── Header.tsx                     # View toggle, today, navigation
+│   │   ├── Sidebar.tsx                    # Calendar list, visibility toggles
 │   │   ├── views/
-│   │   │   ├── WeekView.tsx               # 7-column time grid (default view)
+│   │   │   ├── ViewRouter.tsx             # Declarative view selection by ViewMode
+│   │   │   ├── WeekView.tsx               # 7-column time grid
 │   │   │   ├── DayView.tsx                # Single-column time grid
-│   │   │   ├── MonthView.tsx              # Month grid with event dots/titles
-│   │   │   └── AgendaView.tsx             # Chronological list of upcoming events
+│   │   │   ├── MonthView.tsx              # Month grid
+│   │   │   └── AgendaView.tsx             # Chronological list
 │   │   ├── events/
-│   │   │   ├── EventBlock.tsx             # Rendered event on the grid (colored, positioned)
-│   │   │   ├── EventDetail.tsx            # Full event editor panel/modal
-│   │   │   ├── QuickCreate.tsx            # Click-to-create popover (name, time, optional fields)
-│   │   │   └── EventDrag.tsx              # Drag-to-resize / drag-to-move logic
+│   │   │   ├── EventBlock.tsx             # Positioned event on grid
+│   │   │   ├── EventDetail.tsx            # Shape-driven editor (iterates shape properties)
+│   │   │   ├── QuickCreate.tsx            # Click-to-create popover
+│   │   │   └── EventDrag.tsx              # Drag/resize logic
+│   │   ├── forms/                         # Generic shape-driven form components
+│   │   │   ├── ShapeForm.tsx              # Renders a form from any shape definition + annotations
+│   │   │   ├── FieldRenderer.tsx          # Dispatches to input type by shape property datatype
+│   │   │   └── field-registry.ts          # Maps datatype → input component (declarative)
 │   │   ├── components/
-│   │   │   ├── TimeGrid.tsx               # Shared hour-slot grid used by Week/Day views
-│   │   │   ├── DatePicker.tsx             # Mini calendar for date navigation
-│   │   │   ├── TimePicker.tsx             # Time input component
-│   │   │   └── CalendarChip.tsx           # Colored label for calendar identity
-│   │   └── hooks/
-│   │       ├── useCalendarStore.ts        # Reactive bridge: graph store → SolidJS signals
-│   │       ├── useViewState.ts            # Current view, selected date, visible range
-│   │       ├── useEvents.ts               # Query + filter events for the visible range
-│   │       └── useDragDrop.ts             # Pointer event management for grid interactions
+│   │   │   ├── TimeGrid.tsx               # Shared hour-slot grid
+│   │   │   ├── DatePicker.tsx             # Mini calendar
+│   │   │   ├── TimePicker.tsx             # Time input
+│   │   │   └── CalendarChip.tsx           # Colored label
+│   │   └── state/
+│   │       ├── view-state.ts              # Current view, date, range (SolidJS store)
+│   │       ├── calendar-state.ts          # Visible calendars, calendar metadata (SolidJS store)
+│   │       └── event-state.ts             # Reactive query results (derived from view-state + graph)
 │   │
 │   ├── scheduling/                        # Layer 2 — Person-to-Person Scheduling
-│   │   ├── meeting-request.ts             # Create/accept/decline/counter meeting requests
-│   │   ├── invite-flow.ts                 # Auto-create shared graph for attendee negotiation
-│   │   ├── InvitePanel.tsx                # UI for incoming/outgoing requests
-│   │   └── ContactPicker.tsx              # Search known DIDs for attendee selection
-│   │
-│   ├── availability/                      # Layer 3 — Free/Busy & Availability
-│   │   ├── freebusy.ts                    # Generate and publish FreeBusy from local events
-│   │   ├── availability-overlay.ts        # Merge remote FreeBusy into scheduling view
-│   │   ├── slot-finder.ts                 # Find first mutually free slot
-│   │   └── AvailabilityStrip.tsx          # Visual overlay on time grid
+│   │   ├── invite-flow.ts                 # Declarative flow: event+attendee → shared graph → MeetingRequest
+│   │   ├── request-transitions.ts         # State machine: pending → accepted/declined/counter
+│   │   ├── InvitePanel.tsx                # Incoming/outgoing request list
+│   │   └── ContactPicker.tsx              # DID search
 │   │
 │   ├── shared/                            # Layer 4 — Shared Calendars
-│   │   ├── shared-calendar.ts             # Create/join/leave shared calendar graphs
-│   │   ├── governance.ts                  # Role-based permissions (who can create/edit/delete)
-│   │   └── SharedCalendarSettings.tsx     # UI for managing shared calendar membership + roles
+│   │   ├── shared-calendar-ops.ts         # Create/join/leave (delegates to graph.share/join)
+│   │   ├── governance-rules.ts            # Declarative role→permission mapping table
+│   │   └── SharedCalendarSettings.tsx     # Membership + role management UI
 │   │
-│   └── interop/                           # Layer 5 — Adoption & Onboarding
-│       ├── import-wizard.ts               # First-run import flow (ICS file, Google export)
-│       ├── natural-language.ts            # Quick-add parsing ("Coffee tomorrow at 10am")
+│   └── onboarding/                        # Layer 5 — Adoption
+│       ├── import-wizard.ts               # ICS file → ics-mapping → createInstance pipeline
+│       ├── natural-language.ts            # Quick-add string → partial event fields
 │       └── WelcomeWizard.tsx              # First-run UI
 │
-├── tests/                                 # Playwright E2E tests
-│   └── ...
+├── tests/
 ├── index.html
 ├── vite.config.ts
 ├── tsconfig.json
@@ -95,290 +121,472 @@ packages/client/
 
 ---
 
-## Layer 0: Data Foundation
+## Layer 0: Declarative Data Foundation
 
-Everything above depends on this. No UI — pure data operations against `navigator.graph`.
+### Shape Definitions (the source of truth)
 
-### `lib/predicates.ts`
+Each shape is a JSON definition with **annotations** — metadata that drives UI rendering, ICS mapping, validation, and default values. Annotations are *not* part of the Living Web shape spec — they are an Agenda-level extension stored alongside the definition.
 
-URI constants. Single source of truth for all predicate strings.
-
-```typescript
-// Schema.org predicates
-export const SCHEMA = {
-  name: 'schema://name',
-  startDate: 'schema://startDate',
-  endDate: 'schema://endDate',
-  location: 'schema://location',
-  description: 'schema://description',
-  organizer: 'schema://organizer',
-  attendee: 'schema://attendee',
-  eventStatus: 'schema://eventStatus',
-  eventAttendanceMode: 'schema://eventAttendanceMode',
-  url: 'schema://url',
-} as const
-
-// Agenda-specific predicates
-export const AGENDA = {
-  recurrence: 'agenda://recurrence',
-  reminder: 'agenda://reminder',
-  visibility: 'agenda://visibility',
-  calendarId: 'agenda://calendarId',
-  icsUid: 'agenda://icsUid',
-  // MeetingRequest predicates
-  from: 'agenda://from',
-  to: 'agenda://to',
-  status: 'agenda://status',
-  counterStart: 'agenda://counterStart',
-  counterEnd: 'agenda://counterEnd',
-  message: 'agenda://message',
-  // FreeBusy predicates
-  agent: 'agenda://agent',
-  start: 'agenda://start',
-  end: 'agenda://end',
-  slots: 'agenda://slots',
-  generated: 'agenda://generated',
-} as const
-```
-
-### `lib/types.ts`
-
-Domain types. These are the application-level types, not Living Web types.
+#### `data/shapes/event.ts`
 
 ```typescript
-export interface CalendarEvent {
-  uri: string                    // urn:event:<uuid>
-  name: string                   // required
-  startDate: string              // ISO 8601 datetime, required
-  endDate: string                // ISO 8601 datetime, required
-  location?: string
-  description?: string
-  organizer: string              // DID URI
-  attendees: string[]            // DID URIs
-  status: EventStatus
-  attendanceMode?: AttendanceMode
-  url?: string
-  recurrence?: string            // RRULE string
-  reminder?: string              // ISO 8601 duration (e.g. "PT15M")
-  visibility: EventVisibility
-  calendarId: string
-  icsUid?: string                // for ICS interop
-}
+import type { ShapeDefinition } from '../engine/types'
+import type { ShapeAnnotations } from '../derivations/types'
 
-export type EventStatus = 'EventScheduled' | 'EventCancelled' | 'EventPostponed' | 'EventRescheduled'
-export type EventVisibility = 'private' | 'busy' | 'public'
-export type AttendanceMode = 'OnlineEventAttendanceMode' | 'OfflineEventAttendanceMode' | 'MixedEventAttendanceMode'
-
-export interface MeetingRequest {
-  uri: string
-  eventUri: string
-  from: string                   // DID
-  to: string                     // DID
-  status: RequestStatus
-  counterStart?: string
-  counterEnd?: string
-  message?: string
-}
-
-export type RequestStatus = 'pending' | 'accepted' | 'declined' | 'tentative' | 'counter'
-
-export interface FreeBusyWindow {
-  uri: string
-  agent: string                  // DID
-  start: string                  // datetime
-  end: string                    // datetime
-  slots: FreeBusySlot[]
-  generated: string              // datetime
-}
-
-export interface FreeBusySlot {
-  start: string
-  end: string
-  status: 'free' | 'busy' | 'tentative'
-}
-
-export interface CalendarMeta {
-  id: string
-  name: string
-  color: string
-  visible: boolean
-}
-```
-
-### `lib/schemas.ts`
-
-Shape definition JSON strings and a registration function. Shapes are registered on graph bootstrap.
-
-```typescript
+/** The Living Web shape — pure spec-level definition */
 export const EVENT_SHAPE: ShapeDefinition = {
   targetClass: 'schema://Event',
   properties: [
-    { path: 'schema://name', name: 'name', datatype: 'string', minCount: 1, maxCount: 1 },
-    { path: 'schema://startDate', name: 'startDate', datatype: 'dateTime', minCount: 1, maxCount: 1 },
-    { path: 'schema://endDate', name: 'endDate', datatype: 'dateTime', minCount: 1, maxCount: 1 },
-    { path: 'schema://location', name: 'location', datatype: 'string', maxCount: 1 },
-    { path: 'schema://description', name: 'description', datatype: 'string', maxCount: 1 },
-    { path: 'schema://organizer', name: 'organizer', datatype: 'string', minCount: 1, maxCount: 1 },
-    { path: 'schema://attendee', name: 'attendees', datatype: 'string' },
-    { path: 'schema://eventStatus', name: 'status', datatype: 'string', maxCount: 1 },
-    { path: 'schema://eventAttendanceMode', name: 'attendanceMode', datatype: 'string', maxCount: 1 },
-    { path: 'schema://url', name: 'url', datatype: 'string', maxCount: 1 },
-    { path: 'agenda://recurrence', name: 'recurrence', datatype: 'string', maxCount: 1 },
-    { path: 'agenda://reminder', name: 'reminder', datatype: 'string', maxCount: 1 },
-    { path: 'agenda://visibility', name: 'visibility', datatype: 'string', maxCount: 1 },
-    { path: 'agenda://calendarId', name: 'calendarId', datatype: 'string', maxCount: 1 },
-    { path: 'agenda://icsUid', name: 'icsUid', datatype: 'string', maxCount: 1 },
+    { path: 'schema://name',                    name: 'name',           datatype: 'string',   minCount: 1, maxCount: 1 },
+    { path: 'schema://startDate',               name: 'startDate',      datatype: 'dateTime', minCount: 1, maxCount: 1 },
+    { path: 'schema://endDate',                 name: 'endDate',        datatype: 'dateTime', minCount: 1, maxCount: 1 },
+    { path: 'schema://location',                name: 'location',       datatype: 'string',               maxCount: 1 },
+    { path: 'schema://description',             name: 'description',    datatype: 'string',               maxCount: 1 },
+    { path: 'schema://organizer',               name: 'organizer',      datatype: 'string',   minCount: 1, maxCount: 1 },
+    { path: 'schema://attendee',                name: 'attendees',      datatype: 'string'                             },
+    { path: 'schema://eventStatus',             name: 'status',         datatype: 'string',               maxCount: 1 },
+    { path: 'schema://eventAttendanceMode',     name: 'attendanceMode', datatype: 'string',               maxCount: 1 },
+    { path: 'schema://url',                     name: 'url',            datatype: 'string',               maxCount: 1 },
+    { path: 'agenda://recurrence',              name: 'recurrence',     datatype: 'string',               maxCount: 1 },
+    { path: 'agenda://reminder',                name: 'reminder',       datatype: 'string',               maxCount: 1 },
+    { path: 'agenda://visibility',              name: 'visibility',     datatype: 'string',               maxCount: 1 },
+    { path: 'agenda://calendarId',              name: 'calendarId',     datatype: 'string',               maxCount: 1 },
+    { path: 'agenda://icsUid',                  name: 'icsUid',         datatype: 'string',               maxCount: 1 },
   ],
   constructor: [
-    { action: 'addTriple', source: 'this', predicate: 'schema://name', target: 'name' },
+    { action: 'addTriple', source: 'this', predicate: 'schema://name',      target: 'name' },
     { action: 'addTriple', source: 'this', predicate: 'schema://startDate', target: 'startDate' },
-    { action: 'addTriple', source: 'this', predicate: 'schema://endDate', target: 'endDate' },
+    { action: 'addTriple', source: 'this', predicate: 'schema://endDate',   target: 'endDate' },
     { action: 'addTriple', source: 'this', predicate: 'schema://organizer', target: 'organizer' },
   ],
 }
 
-export const MEETING_REQUEST_SHAPE: ShapeDefinition = { /* ... */ }
-export const FREE_BUSY_SHAPE: ShapeDefinition = { /* ... */ }
-```
+/** Agenda-level annotations — drives UI, validation, defaults, ICS mapping */
+export const EVENT_ANNOTATIONS: ShapeAnnotations = {
+  /** Display metadata per property */
+  fields: {
+    name:           { label: 'Title',       inputType: 'text',     group: 'primary', order: 0 },
+    startDate:      { label: 'Start',       inputType: 'datetime', group: 'primary', order: 1 },
+    endDate:        { label: 'End',         inputType: 'datetime', group: 'primary', order: 2 },
+    location:       { label: 'Location',    inputType: 'text',     group: 'details', order: 3 },
+    description:    { label: 'Description', inputType: 'textarea', group: 'details', order: 4 },
+    organizer:      { label: 'Organizer',   inputType: 'hidden',   group: 'system',  order: -1 },
+    attendees:      { label: 'Attendees',   inputType: 'did-list', group: 'people',  order: 5 },
+    status:         { label: 'Status',      inputType: 'select',   group: 'details', order: 6,
+                      options: ['EventScheduled', 'EventCancelled', 'EventPostponed', 'EventRescheduled'] },
+    attendanceMode: { label: 'Attendance',  inputType: 'select',   group: 'details', order: 7,
+                      options: ['OnlineEventAttendanceMode', 'OfflineEventAttendanceMode', 'MixedEventAttendanceMode'] },
+    url:            { label: 'URL',         inputType: 'url',      group: 'details', order: 8 },
+    recurrence:     { label: 'Repeat',      inputType: 'rrule',    group: 'details', order: 9 },
+    reminder:       { label: 'Reminder',    inputType: 'duration', group: 'details', order: 10 },
+    visibility:     { label: 'Visibility',  inputType: 'select',   group: 'details', order: 11,
+                      options: ['private', 'busy', 'public'] },
+    calendarId:     { label: 'Calendar',    inputType: 'calendar-select', group: 'primary', order: 12 },
+    icsUid:         { label: 'ICS UID',     inputType: 'hidden',   group: 'system',  order: -1 },
+  },
 
-### `lib/calendar-store.ts`
+  /** Declarative default values (applied when creating a new instance) */
+  defaults: {
+    status: 'EventScheduled',
+    visibility: 'private',
+    // organizer: derived from navigator.credentials at runtime
+  },
 
-The core data layer. Owns the graph reference and exposes CRUD.
+  /** Declarative validation rules (beyond what the shape's cardinality enforces) */
+  rules: [
+    { type: 'comparison', field: 'endDate', operator: '>', referenceField: 'startDate',
+      message: 'End date must be after start date' },
+  ],
 
-```typescript
-export interface CalendarStore {
-  /** Bootstrap: find or create the personal calendar graph, register shapes */
-  init(): Promise<void>
-
-  /** CRUD */
-  createEvent(event: Omit<CalendarEvent, 'uri'>): Promise<CalendarEvent>
-  getEvent(uri: string): Promise<CalendarEvent | null>
-  updateEvent(uri: string, patch: Partial<CalendarEvent>): Promise<CalendarEvent>
-  deleteEvent(uri: string): Promise<boolean>
-
-  /** Queries */
-  getEventsInRange(start: string, end: string): Promise<CalendarEvent[]>
-  getEventsByCalendar(calendarId: string): Promise<CalendarEvent[]>
-
-  /** Calendar management */
-  getCalendars(): Promise<CalendarMeta[]>
-  createCalendar(meta: Omit<CalendarMeta, 'id'>): Promise<CalendarMeta>
-  updateCalendar(id: string, patch: Partial<CalendarMeta>): Promise<CalendarMeta>
-  deleteCalendar(id: string): Promise<boolean>
-
-  /** Reactive subscriptions */
-  onEventChanged(callback: (event: CalendarEvent) => void): () => void
+  /** ICS field mapping — bidirectional, keyed by shape property name */
+  icsMapping: {
+    name:        'SUMMARY',
+    startDate:   'DTSTART',
+    endDate:     'DTEND',
+    location:    'LOCATION',
+    description: 'DESCRIPTION',
+    organizer:   'ORGANIZER',
+    attendees:   'ATTENDEE',
+    status:      'STATUS',
+    recurrence:  'RRULE',
+    icsUid:      'UID',
+    reminder:    'VALARM.TRIGGER',
+  },
 }
 ```
 
-### `lib/query.ts`
-
-Date-range query construction, occurrence expansion for recurring events.
-
-### `lib/ics.ts`
-
-ICS import/export using `ical.js`.
+#### Annotation Types
 
 ```typescript
-export function parseICS(icsString: string): Omit<CalendarEvent, 'uri' | 'organizer'>[]
-export function generateICS(events: CalendarEvent[]): string
-export function eventToVEVENT(event: CalendarEvent): string
-export function veventToEvent(vevent: ICAL.Event): Omit<CalendarEvent, 'uri' | 'organizer'>
+/** data/derivations/types.ts */
+
+export interface ShapeAnnotations {
+  fields: Record<string, FieldAnnotation>
+  defaults: Record<string, string | number | boolean>
+  rules: ValidationRule[]
+  icsMapping?: Record<string, string>     // shape property name → ICS property name
+}
+
+export interface FieldAnnotation {
+  label: string
+  inputType: InputType
+  group: string                            // for grouping in UI (primary, details, people, system)
+  order: number                            // display order within group
+  options?: string[]                       // for select inputs
+  hidden?: boolean                         // hidden from user-facing forms
+}
+
+export type InputType =
+  | 'text' | 'textarea' | 'url'            // string inputs
+  | 'datetime' | 'date' | 'time'           // temporal inputs
+  | 'duration'                              // ISO 8601 duration picker
+  | 'select'                                // enum dropdown
+  | 'rrule'                                 // recurrence rule builder
+  | 'did-list'                              // multi-DID selector
+  | 'calendar-select'                       // calendar chooser
+  | 'hidden'                                // not rendered
+
+export interface ValidationRule {
+  type: 'comparison' | 'pattern' | 'custom'
+  field: string
+  operator?: '>' | '<' | '>=' | '<=' | '==' | '!='
+  referenceField?: string                  // for cross-field comparison
+  pattern?: string                         // for regex validation
+  message: string
+}
 ```
 
-### `lib/rrule.ts`
-
-RRULE parsing and occurrence expansion for a given date window.
+#### Shape Registry
 
 ```typescript
+/** data/shapes/index.ts */
+
+export interface RegisteredShape {
+  shape: ShapeDefinition
+  annotations: ShapeAnnotations
+}
+
+/** All shapes, keyed by name. The engine registers these on graph bootstrap. */
+export const SHAPE_REGISTRY: Record<string, RegisteredShape> = {
+  Event:          { shape: EVENT_SHAPE,            annotations: EVENT_ANNOTATIONS },
+  MeetingRequest: { shape: MEETING_REQUEST_SHAPE,  annotations: MEETING_REQUEST_ANNOTATIONS },
+  FreeBusy:       { shape: FREE_BUSY_SHAPE,        annotations: FREE_BUSY_ANNOTATIONS },
+  CalendarMeta:   { shape: CALENDAR_META_SHAPE,    annotations: CALENDAR_META_ANNOTATIONS },
+}
+```
+
+### Generic Engine
+
+Shape-agnostic operations. These work on *any* registered shape.
+
+#### `data/engine/instance-ops.ts`
+
+```typescript
+/**
+ * Generic, shape-driven CRUD. No shape-specific code — operates
+ * on any shape from the registry using its definition + annotations.
+ */
+
+export interface InstanceOps {
+  /**
+   * Create an instance of a shape.
+   * 1. Look up shape in registry
+   * 2. Apply declarative defaults from annotations
+   * 3. Run declarative validation rules
+   * 4. Generate URI (urn:<shape>:<uuid>)
+   * 5. Call graph.createShapeInstance()
+   */
+  create(shapeName: string, data: Record<string, unknown>): Promise<Record<string, unknown>>
+
+  /** Get instance data by URI */
+  get(shapeName: string, uri: string): Promise<Record<string, unknown> | null>
+
+  /**
+   * Update instance properties.
+   * 1. For each key in patch: call graph.setShapeProperty() or collection ops
+   * 2. Re-validate after patch (run rules against merged data)
+   */
+  update(shapeName: string, uri: string, patch: Record<string, unknown>): Promise<Record<string, unknown>>
+
+  /** Delete an instance (remove all its triples) */
+  delete(shapeName: string, uri: string): Promise<boolean>
+
+  /** Query instances by filter parameters, derived from shape metadata */
+  query(shapeName: string, filters: QueryFilters): Promise<Record<string, unknown>[]>
+}
+
+export interface QueryFilters {
+  /** Property equality filters — keys are shape property names */
+  where?: Record<string, string | string[]>
+  /** Temporal range filter (for properties with datatype 'dateTime') */
+  dateRange?: { property: string; start: string; end: string }
+  /** Max results */
+  limit?: number
+}
+```
+
+#### `data/engine/query-builder.ts`
+
+```typescript
+/**
+ * Builds graph queries from shape metadata + filter parameters.
+ * The shape definition tells us which predicates to query;
+ * the filters tell us what values to match.
+ */
+
+export function buildQuery(
+  shape: ShapeDefinition,
+  filters: QueryFilters,
+): TripleQuery | string  // returns TripleQuery for simple filters, SPARQL string for complex
+```
+
+#### `data/engine/graph-context.ts`
+
+```typescript
+/**
+ * Bootstrap:
+ * 1. navigator.graph.create("My Calendar") or find existing
+ * 2. For each shape in SHAPE_REGISTRY: graph.addShape(name, JSON.stringify(shape))
+ * 3. Provide graph + InstanceOps to the component tree via SolidJS context
+ */
+```
+
+### Declarative ICS Mapping
+
+No per-field conversion functions. The mapping table drives both import and export.
+
+#### `data/derivations/ics-mapping.ts`
+
+```typescript
+/**
+ * Generic ICS ↔ shape mapping, driven entirely by the icsMapping annotation.
+ *
+ * Import: for each VEVENT property, look up which shape property it maps to.
+ * Export: for each shape property, look up which ICS property to emit.
+ *
+ * Datatype conversion is derived from the shape property's datatype:
+ *   'dateTime' → ICS datetime format conversion
+ *   'string'   → direct passthrough
+ *
+ * No per-field code.
+ */
+
+export function importVEvent(
+  vevent: ICALComponent,
+  mapping: Record<string, string>,
+  shape: ShapeDefinition,
+): Record<string, unknown>
+
+export function exportVEvent(
+  instance: Record<string, unknown>,
+  mapping: Record<string, string>,
+  shape: ShapeDefinition,
+): string
+```
+
+### Declarative Validation
+
+#### `data/derivations/validation-rules.ts`
+
+```typescript
+/**
+ * Validate instance data against:
+ * 1. Shape cardinality (minCount/maxCount) — derived from shape definition
+ * 2. Shape datatypes — derived from shape definition
+ * 3. Declarative rules from annotations (cross-field comparisons, patterns)
+ *
+ * Returns an array of validation errors (empty = valid).
+ */
+
+export function validate(
+  shapeName: string,
+  data: Record<string, unknown>,
+  registry: Record<string, RegisteredShape>,
+): ValidationError[]
+
+export interface ValidationError {
+  field: string
+  rule: string
+  message: string
+}
+```
+
+### Transforms (Pure Functions)
+
+#### `data/transforms/rrule.ts`
+
+```typescript
+/** Parse RRULE string into structured options */
 export function parseRRule(rrule: string): RRuleOptions
-export function expandOccurrences(rrule: string, dtstart: string, windowStart: string, windowEnd: string): string[]
+
+/** Expand a recurring event into concrete occurrences within a window */
+export function expandOccurrences(
+  rrule: string,
+  dtstart: string,
+  windowStart: string,
+  windowEnd: string,
+): Occurrence[]
+
+export interface Occurrence {
+  startDate: string
+  endDate: string
+  parentUri: string    // the recurring event this was expanded from
+  occurrenceIndex: number
+}
 ```
 
-### Layer 0 Tests
+#### `data/transforms/freebusy-gen.ts`
 
-All tests use Vitest. The test environment provides a mock `navigator.graph` that implements the Living Web `PersonalGraph` interface in-memory (no AD4M executor needed for unit tests).
+```typescript
+/**
+ * Pure projection: events → free/busy slots.
+ * Strips all event details — only produces time ranges + status.
+ */
+export function eventsToFreeBusy(
+  events: Record<string, unknown>[],
+  windowStart: string,
+  windowEnd: string,
+): FreeBusySlot[]
+```
+
+#### `data/transforms/slot-finder.ts`
+
+```typescript
+/**
+ * Pure function: given N participants' FreeBusy windows,
+ * find the earliest mutually free slot of a given duration.
+ */
+export function findFreeSlot(
+  participants: FreeBusySlot[][],
+  durationMinutes: number,
+  searchStart: string,
+  searchEnd: string,
+): { start: string; end: string } | null
+```
+
+### Pipelines (Composed Chains)
+
+#### `data/pipelines/visible-events.ts`
+
+```typescript
+/**
+ * The main data pipeline for the calendar UI.
+ *
+ * Pipeline:
+ *   1. query(Event, { dateRange: { property: 'startDate', start, end } })
+ *   2. → for each with recurrence: expandOccurrences()
+ *   3. → filter by visibleCalendars
+ *   4. → sort by startDate
+ *   5. → return
+ *
+ * Each step is a pure function. The pipeline is re-evaluated
+ * reactively when view state changes (date range, visible calendars).
+ */
+export function visibleEventsPipeline(
+  instanceOps: InstanceOps,
+  viewRange: { start: string; end: string },
+  visibleCalendars: Set<string>,
+): Promise<DisplayEvent[]>
+
+export interface DisplayEvent {
+  uri: string
+  parentUri?: string              // set for expanded recurrence occurrences
+  data: Record<string, unknown>   // shape instance data
+  calendarColor: string           // resolved from CalendarMeta
+}
+```
+
+---
+
+## Layer 0 Tests
+
+All tests use Vitest. The test environment provides a mock `navigator.graph` — an in-memory implementation of the Living Web `PersonalGraph` interface (no AD4M executor needed).
 
 ```
-lib/__tests__/
-├── calendar-store.test.ts
-├── query.test.ts
+data/__tests__/
+├── instance-ops.test.ts
+├── query-builder.test.ts
+├── validation.test.ts
 ├── ics.test.ts
 ├── rrule.test.ts
-└── schemas.test.ts
+├── freebusy.test.ts
+├── slot-finder.test.ts
+├── pipeline.test.ts
+└── shapes.test.ts
 ```
 
-#### `calendar-store.test.ts`
+### `shapes.test.ts` — Shape Definition Integrity
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| S-01 | `init() MUST create a personal graph if none exists` | MUST | First call creates a graph named "My Calendar" via `navigator.graph.create()`. Second call finds and reuses the existing graph. |
-| S-02 | `init() MUST register the Event shape on the graph` | MUST | After init, `graph.getShapes()` MUST include "Event". |
-| S-03 | `init() MUST register the MeetingRequest shape` | MUST | After init, `graph.getShapes()` MUST include "MeetingRequest". |
-| S-04 | `init() MUST register the FreeBusy shape` | MUST | After init, `graph.getShapes()` MUST include "FreeBusy". |
-| S-05 | `createEvent() MUST create a shape instance with all required fields` | MUST | Created event MUST have name, startDate, endDate, organizer, calendarId, visibility, status. |
-| S-06 | `createEvent() MUST generate a unique URI` | MUST | Two calls with identical data MUST produce different URIs. |
-| S-07 | `createEvent() MUST reject when name is missing` | MUST | Omitting name MUST throw. |
-| S-08 | `createEvent() MUST reject when startDate is missing` | MUST | Omitting startDate MUST throw. |
-| S-09 | `createEvent() MUST reject when endDate is missing` | MUST | Omitting endDate MUST throw. |
-| S-10 | `createEvent() MUST reject when endDate is before startDate` | MUST | endDate < startDate MUST throw a validation error. |
-| S-11 | `createEvent() MUST default status to 'EventScheduled'` | MUST | If status is not provided, the stored event MUST have status `EventScheduled`. |
-| S-12 | `createEvent() MUST default visibility to 'private'` | MUST | If visibility is not provided, the stored event MUST have visibility `private`. |
-| S-13 | `getEvent() MUST return the event for a valid URI` | MUST | After createEvent, getEvent with the returned URI MUST return an identical event. |
-| S-14 | `getEvent() MUST return null for an unknown URI` | MUST | getEvent with a non-existent URI MUST return null. |
-| S-15 | `updateEvent() MUST modify only the specified fields` | MUST | Updating name MUST NOT change startDate, endDate, or other fields. |
-| S-16 | `updateEvent() MUST reject endDate before startDate` | MUST | Updating endDate to a time before startDate MUST throw. |
-| S-17 | `updateEvent() MUST return the updated event` | MUST | The returned event MUST reflect the applied changes. |
-| S-18 | `deleteEvent() MUST remove the event from the graph` | MUST | After deletion, getEvent MUST return null. |
-| S-19 | `deleteEvent() MUST return true for an existing event` | MUST | Deleting an event that exists MUST return true. |
-| S-20 | `deleteEvent() MUST return false for a non-existent event` | MUST | Deleting a URI that doesn't exist MUST return false. |
-| S-21 | `getEventsInRange() MUST return events overlapping the range` | MUST | Events that start before the range but end within it, events fully within the range, and events that start within but end after MUST all be returned. |
-| S-22 | `getEventsInRange() MUST NOT return events outside the range` | MUST | Events ending before range start or starting after range end MUST NOT be returned. |
-| S-23 | `getEventsInRange() MUST include recurring event occurrences` | MUST | A weekly recurring event MUST produce occurrences for each week within the range. |
-| S-24 | `getEventsByCalendar() MUST filter by calendarId` | MUST | Events from other calendars MUST NOT be included. |
-| S-25 | `onEventChanged() MUST fire when an event is created` | MUST | The callback MUST receive the new event. |
-| S-26 | `onEventChanged() MUST fire when an event is updated` | MUST | The callback MUST receive the updated event. |
-| S-27 | `onEventChanged() MUST fire when an event is deleted` | MUST | The callback MUST be notified of the deletion. |
-| S-28 | `onEventChanged() MUST return an unsubscribe function` | MUST | Calling the returned function MUST stop future callbacks. |
+| SC-01 | `Every shape in SHAPE_REGISTRY MUST have a targetClass` | MUST | All registered shapes MUST have a non-empty targetClass. |
+| SC-02 | `Every shape property MUST have a valid predicate URI (schema:// or agenda://)` | MUST | No bare strings or typos in predicate paths. |
+| SC-03 | `Every shape property MUST have a name matching [a-zA-Z_][a-zA-Z0-9_]*` | MUST | Per Living Web spec. |
+| SC-04 | `Shape property names MUST be unique within each shape` | MUST | No duplicate property names. |
+| SC-05 | `Constructor actions MUST reference only declared property names as targets` | MUST | Constructor target values that aren't literal URIs MUST correspond to a property name. |
+| SC-06 | `Every shape MUST have annotations in the registry` | MUST | Each RegisteredShape MUST have both shape and annotations. |
+| SC-07 | `Every shape property MUST have a corresponding field annotation` | MUST | The annotations.fields keys MUST be a superset of the shape property names. |
+| SC-08 | `Annotation defaults MUST only reference declared property names` | MUST | No defaults for non-existent properties. |
+| SC-09 | `Annotation validation rules MUST only reference declared property names` | MUST | Both field and referenceField MUST exist on the shape. |
+| SC-10 | `ICS mapping keys MUST only reference declared property names` | MUST | No orphan ICS mappings. |
 
-#### `schemas.test.ts`
+### `instance-ops.test.ts` — Generic CRUD
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| SC-01 | `EVENT_SHAPE MUST have targetClass 'schema://Event'` | MUST | Shape definition targetClass MUST be `schema://Event`. |
-| SC-02 | `EVENT_SHAPE MUST define name, startDate, endDate as required (minCount: 1)` | MUST | These three properties MUST have `minCount: 1`. |
-| SC-03 | `EVENT_SHAPE MUST define organizer as required` | MUST | Organizer MUST have `minCount: 1`. |
-| SC-04 | `EVENT_SHAPE MUST define attendees as a collection (no maxCount)` | MUST | The attendees property MUST NOT have a maxCount, allowing multiple values. |
-| SC-05 | `EVENT_SHAPE properties MUST each have a valid predicate URI` | MUST | Every property path MUST be a `schema://` or `agenda://` URI. |
-| SC-06 | `EVENT_SHAPE constructor MUST create triples for all required fields` | MUST | Constructor actions MUST cover name, startDate, endDate, organizer. |
-| SC-07 | `MEETING_REQUEST_SHAPE MUST have targetClass 'agenda://MeetingRequest'` | MUST | Shape targetClass correct. |
-| SC-08 | `FREE_BUSY_SHAPE MUST have targetClass 'agenda://FreeBusy'` | MUST | Shape targetClass correct. |
+| IO-01 | `create() MUST generate a unique URI for every instance` | MUST | Two calls with identical data MUST produce different URIs. |
+| IO-02 | `create() MUST apply declarative defaults from annotations` | MUST | Creating an Event without status MUST result in `status: 'EventScheduled'`. |
+| IO-03 | `create() MUST reject if a required property (minCount ≥ 1) is missing` | MUST | Omitting `name` on an Event MUST throw a validation error. |
+| IO-04 | `create() MUST run validation rules before persisting` | MUST | An Event with endDate before startDate MUST be rejected. |
+| IO-05 | `create() MUST call graph.createShapeInstance() with correct shape and data` | MUST | The mock graph MUST receive exactly the shape name, URI, and merged data. |
+| IO-06 | `get() MUST return instance data for a valid URI` | MUST | After create, get with the returned URI MUST return matching data. |
+| IO-07 | `get() MUST return null for an unknown URI` | MUST | Non-existent URI MUST return null, not throw. |
+| IO-08 | `update() MUST modify only the specified fields` | MUST | Updating `name` MUST NOT change `startDate` or other fields. |
+| IO-09 | `update() MUST re-validate after applying the patch` | MUST | Updating endDate to before startDate MUST be rejected. |
+| IO-10 | `update() MUST call the correct graph property operations` | MUST | Scalar properties → setShapeProperty. Collections → addToShapeCollection/removeFromShapeCollection. |
+| IO-11 | `delete() MUST remove all triples for the instance` | MUST | After delete, get MUST return null. |
+| IO-12 | `delete() MUST return true for existing, false for non-existent` | MUST | Matches graph.removeTriple semantics. |
+| IO-13 | `query() with dateRange MUST return instances overlapping the range` | MUST | Includes events starting before but ending within, fully within, and starting within but ending after. |
+| IO-14 | `query() with dateRange MUST NOT return instances outside the range` | MUST | Events ending before range start or starting after range end excluded. |
+| IO-15 | `query() with where filter MUST match by property value` | MUST | `where: { calendarId: 'work' }` returns only work calendar events. |
+| IO-16 | `create() MUST work for any shape in the registry (not just Event)` | MUST | Creating a MeetingRequest or FreeBusy MUST follow the same code path. |
+| IO-17 | `The InstanceOps interface MUST NOT contain any shape-specific methods` | MUST | No `createEvent()` or `createMeetingRequest()` — only generic `create(shapeName, data)`. |
 
-#### `ics.test.ts`
+### `query-builder.test.ts` — Query Derivation
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| I-01 | `parseICS() MUST extract SUMMARY as name` | MUST | ICS SUMMARY → event name. |
-| I-02 | `parseICS() MUST extract DTSTART as startDate in ISO 8601` | MUST | Both date-only and datetime formats MUST be handled. |
-| I-03 | `parseICS() MUST extract DTEND as endDate in ISO 8601` | MUST | Missing DTEND SHOULD default to startDate + 1 hour for datetime, or startDate + 1 day for date-only. |
-| I-04 | `parseICS() MUST extract LOCATION as location` | MUST | Direct mapping. |
-| I-05 | `parseICS() MUST extract DESCRIPTION as description` | MUST | Direct mapping. |
-| I-06 | `parseICS() MUST extract RRULE as recurrence` | MUST | The raw RRULE string MUST be preserved. |
-| I-07 | `parseICS() MUST extract UID as icsUid` | MUST | Enables round-trip sync with external calendars. |
-| I-08 | `parseICS() MUST handle multiple VEVENT components` | MUST | An ICS file with N VEVENTs MUST produce N events. |
-| I-09 | `parseICS() SHOULD handle VALARM as reminder` | SHOULD | The TRIGGER duration SHOULD be extracted as an ISO 8601 duration string. |
-| I-10 | `parseICS() MUST ignore non-VEVENT components` | MUST | VTODO, VJOURNAL, VFREEBUSY MUST be skipped. |
-| I-11 | `generateICS() MUST produce valid iCalendar output` | MUST | Output MUST begin with `BEGIN:VCALENDAR` and end with `END:VCALENDAR`. |
-| I-12 | `generateICS() MUST include VCALENDAR PRODID and VERSION` | MUST | VERSION MUST be `2.0`. |
-| I-13 | `generateICS() MUST map name → SUMMARY` | MUST | Reverse of I-01. |
-| I-14 | `generateICS() MUST map startDate → DTSTART` | MUST | ISO 8601 → ICS datetime format. |
-| I-15 | `generateICS() MUST map endDate → DTEND` | MUST | Reverse of I-03. |
-| I-16 | `generateICS() MUST map recurrence → RRULE` | MUST | The RRULE string MUST be output as-is. |
-| I-17 | `generateICS() MUST map icsUid → UID` | MUST | Preserves external identity for sync. |
-| I-18 | `generateICS() MUST generate a UID if icsUid is absent` | MUST | Events without an external UID MUST still have a UID in the output. |
-| I-19 | `parseICS() then generateICS() MUST round-trip core fields` | MUST | Parse → create events → generate → re-parse MUST produce equivalent events. |
+| QB-01 | `buildQuery() MUST derive predicates from shape property paths` | MUST | A filter on `calendarId` MUST produce a query using the `agenda://calendarId` predicate. |
+| QB-02 | `buildQuery() with dateRange MUST produce a temporal range query` | MUST | dateRange on `startDate` MUST constrain by `schema://startDate`. |
+| QB-03 | `buildQuery() with multiple filters MUST combine them with AND` | MUST | `where: { calendarId: 'work' }` + `dateRange` MUST intersect. |
+| QB-04 | `buildQuery() MUST handle collection properties (no maxCount)` | MUST | Filtering on `attendees` MUST match any value in the collection. |
 
-#### `rrule.test.ts`
+### `validation.test.ts` — Declarative Validation
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| VL-01 | `validate() MUST check minCount for required properties` | MUST | Missing `name` → error on `name` field. |
+| VL-02 | `validate() MUST check datatype constraints` | MUST | Non-datetime string for `startDate` → error. |
+| VL-03 | `validate() MUST evaluate comparison rules` | MUST | `endDate <= startDate` → error with the rule's message. |
+| VL-04 | `validate() MUST return empty array when all valid` | MUST | A fully valid Event → `[]`. |
+| VL-05 | `validate() MUST work for any shape (not just Event)` | MUST | MeetingRequest with missing `from` → error. |
+| VL-06 | `validate() MUST evaluate rules ONLY from annotations (no hardcoded logic)` | MUST | Adding a new rule to annotations MUST be enforced without code changes. |
+
+### `ics.test.ts` — Declarative ICS Mapping
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| I-01 | `importVEvent() MUST map ICS fields to shape properties using the icsMapping table` | MUST | SUMMARY → name, DTSTART → startDate, etc. — all driven by the table. |
+| I-02 | `importVEvent() MUST convert ICS datetime to ISO 8601` | MUST | ICS `20260407T100000Z` → `2026-04-07T10:00:00Z`. |
+| I-03 | `importVEvent() MUST ignore ICS fields not in the mapping` | MUST | Unmapped ICS properties MUST be silently dropped. |
+| I-04 | `importVEvent() MUST handle multiple VEVENTs` | MUST | N VEVENTs → N instance data records. |
+| I-05 | `exportVEvent() MUST map shape properties to ICS fields using the icsMapping table` | MUST | name → SUMMARY, startDate → DTSTART, etc. |
+| I-06 | `exportVEvent() MUST produce valid iCalendar output` | MUST | BEGIN:VCALENDAR … END:VCALENDAR, VERSION 2.0, PRODID. |
+| I-07 | `exportVEvent() MUST generate UID if icsUid is absent` | MUST | Every VEVENT MUST have a UID. |
+| I-08 | `importVEvent() → exportVEvent() MUST round-trip core fields` | MUST | Parse → export → re-parse MUST produce equivalent data. |
+| I-09 | `Adding a new field to the icsMapping MUST be sufficient to support it (no code change)` | MUST | This is the key declarative test: add a mapping entry, and import/export handles it. |
+
+### `rrule.test.ts` — Recurrence Expansion
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
@@ -389,51 +597,106 @@ lib/__tests__/
 | R-05 | `parseRRule() MUST parse INTERVAL` | MUST | e.g. `INTERVAL=2` for every other week. |
 | R-06 | `parseRRule() MUST parse COUNT` | MUST | Limit total occurrences. |
 | R-07 | `parseRRule() MUST parse UNTIL` | MUST | End date for recurrence. |
-| R-08 | `expandOccurrences() MUST generate correct dates for daily` | MUST | 7-day window with FREQ=DAILY MUST produce 7 occurrences. |
-| R-09 | `expandOccurrences() MUST generate correct dates for weekly with BYDAY` | MUST | 2-week window with BYDAY=MO,WE MUST produce 4 occurrences. |
-| R-10 | `expandOccurrences() MUST respect COUNT limit` | MUST | FREQ=DAILY;COUNT=3 MUST produce at most 3 occurrences. |
-| R-11 | `expandOccurrences() MUST respect UNTIL limit` | MUST | Occurrences after UNTIL date MUST NOT be generated. |
-| R-12 | `expandOccurrences() MUST NOT generate occurrences outside the query window` | MUST | Occurrences before windowStart or after windowEnd MUST NOT be returned. |
-| R-13 | `expandOccurrences() MUST handle timezone offsets in DTSTART` | MUST | A DTSTART with `+10:00` MUST produce occurrences in the correct absolute times. |
-| R-14 | `expandOccurrences() SHOULD handle EXDATE (exception dates)` | SHOULD | If EXDATE support is implemented, those dates MUST be excluded. |
+| R-08 | `expandOccurrences() MUST generate correct dates for daily recurrence` | MUST | 7-day window with FREQ=DAILY → 7 occurrences. |
+| R-09 | `expandOccurrences() MUST generate correct dates for weekly with BYDAY` | MUST | 2-week window with BYDAY=MO,WE → 4 occurrences. |
+| R-10 | `expandOccurrences() MUST respect COUNT limit` | MUST | FREQ=DAILY;COUNT=3 → at most 3. |
+| R-11 | `expandOccurrences() MUST respect UNTIL limit` | MUST | No occurrences after UNTIL date. |
+| R-12 | `expandOccurrences() MUST NOT generate occurrences outside the query window` | MUST | Before windowStart or after windowEnd → excluded. |
+| R-13 | `expandOccurrences() MUST handle timezone offsets in DTSTART` | MUST | +10:00 offset → correct absolute times. |
+| R-14 | `expandOccurrences() SHOULD handle EXDATE` | SHOULD | Exception dates excluded from results. |
+| R-15 | `expandOccurrences() MUST set parentUri on each occurrence` | MUST | Occurrences MUST reference the source event for edits. |
 
-#### `query.test.ts`
+### `freebusy.test.ts` — Free/Busy Generation
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| Q-01 | `buildDateRangeQuery() MUST produce a query matching events overlapping the range` | MUST | Events where `startDate < rangeEnd AND endDate > rangeStart`. |
-| Q-02 | `buildDateRangeQuery() MUST handle single-day ranges` | MUST | Range where start = end (same day) MUST match events on that day. |
-| Q-03 | `resolveRecurringEvents() MUST expand RRULE occurrences into the query window` | MUST | A weekly event MUST produce individual occurrences for display. |
-| Q-04 | `resolveRecurringEvents() MUST preserve the original event URI on expanded occurrences` | MUST | Occurrences MUST reference the parent event so edits apply to the series. |
-| Q-05 | `resolveRecurringEvents() MUST adjust startDate and endDate for each occurrence` | MUST | Each occurrence MUST have its own correct start/end times. |
+| F-01 | `eventsToFreeBusy() MUST produce busy slots for occupied time` | MUST | Event 10:00–11:00 → busy slot 10:00–11:00. |
+| F-02 | `eventsToFreeBusy() MUST produce free slots for unoccupied time` | MUST | Gap between events → free slot. |
+| F-03 | `eventsToFreeBusy() MUST NOT include any event details` | MUST | Only start, end, status. No name, description, location. |
+| F-04 | `eventsToFreeBusy() MUST handle overlapping events` | MUST | Two overlapping events → single merged busy slot. |
+| F-05 | `eventsToFreeBusy() MUST include expanded recurring occurrences` | MUST | Weekly event → busy slot per occurrence in window. |
+| F-06 | `eventsToFreeBusy() is a pure function (no graph access)` | MUST | Takes event data arrays as input, returns slots. No side effects. |
+
+### `slot-finder.test.ts` — Mutual Availability
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| SF-01 | `findFreeSlot() MUST return a slot where no participant is busy` | MUST | Returned slot MUST NOT overlap any busy slot. |
+| SF-02 | `findFreeSlot() MUST return the earliest possible slot` | MUST | First available slot from searchStart. |
+| SF-03 | `findFreeSlot() MUST return null when no slot exists` | MUST | All time occupied → null. |
+| SF-04 | `findFreeSlot() MUST respect the requested duration` | MUST | Slot duration ≥ requested minutes. |
+| SF-05 | `findFreeSlot() is a pure function (no graph access)` | MUST | Takes arrays of slots, returns result. No side effects. |
+
+### `pipeline.test.ts` — Composed Pipeline
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| P-01 | `visibleEventsPipeline() MUST query, expand recurrences, and filter by calendar` | MUST | End-to-end: create events (some recurring, multiple calendars) → pipeline returns only visible, expanded results. |
+| P-02 | `visibleEventsPipeline() MUST sort results by startDate ascending` | MUST | Output MUST be chronologically ordered. |
+| P-03 | `visibleEventsPipeline() MUST include calendarColor resolved from CalendarMeta` | MUST | Each DisplayEvent MUST have a color. |
+| P-04 | `Changing visible calendars MUST change pipeline output (no re-query needed)` | MUST | The filter step operates on in-memory data, not a new graph query. |
+| P-05 | `Pipeline MUST be composable from independent pure functions` | MUST | Each stage (query, expand, filter, sort) MUST be independently testable and replaceable. |
 
 ---
 
 ## Layer 1: Personal Calendar UI
 
-SolidJS components rendering the data from Layer 0. No networking, no sharing — one person, one calendar.
+SolidJS components consuming the pipeline output. The key declarative element: **`ShapeForm` renders any shape**, and `EventDetail` is just `ShapeForm` with the Event shape and its annotations.
 
-### View State
+### Shape-Driven Forms
 
 ```typescript
-export type ViewMode = 'day' | 'week' | 'month' | 'agenda'
+/** ui/forms/ShapeForm.tsx */
 
-export interface ViewState {
-  mode: ViewMode
-  selectedDate: string           // ISO 8601 date (YYYY-MM-DD)
-  visibleRange: { start: string; end: string }
-  visibleCalendars: Set<string>  // calendar IDs
+/**
+ * Renders a form for any registered shape.
+ *
+ * 1. Reads shape properties from the definition
+ * 2. Groups and orders fields using annotations
+ * 3. Dispatches each field to FieldRenderer based on inputType
+ * 4. Validates on submit using declarative rules
+ *
+ * No shape-specific code in this component.
+ */
+interface ShapeFormProps {
+  shapeName: string
+  data?: Record<string, unknown>          // existing data (for edit mode)
+  onSubmit: (data: Record<string, unknown>) => void
+  onCancel?: () => void
+  groups?: string[]                       // which groups to render (default: all non-system)
 }
 ```
 
-### Layer 1 Tests
+```typescript
+/** ui/forms/field-registry.ts */
 
-E2E tests (Playwright) against the running app with a mock graph backend.
+/**
+ * Declarative mapping: inputType → component.
+ * Adding a new input type = registering one entry here + writing the component.
+ */
+export const FIELD_COMPONENTS: Record<InputType, Component<FieldProps>> = {
+  text:            TextInput,
+  textarea:        TextareaInput,
+  url:             UrlInput,
+  datetime:        DateTimeInput,
+  date:            DateInput,
+  time:            TimeInput,
+  duration:        DurationInput,
+  select:          SelectInput,
+  rrule:           RRuleInput,
+  'did-list':      DIDListInput,
+  'calendar-select': CalendarSelectInput,
+  hidden:          HiddenInput,
+}
+```
+
+### Layer 1 Tests (Playwright E2E)
 
 ```
 tests/
 ├── views.spec.ts
 ├── events.spec.ts
+├── shape-form.spec.ts
 ├── calendar-management.spec.ts
 └── ics-import.spec.ts
 ```
@@ -442,282 +705,206 @@ tests/
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| V-01 | `Week view MUST render 7 day columns` | MUST | The default view MUST show 7 columns for Mon–Sun (or Sun–Sat depending on locale). |
-| V-02 | `Week view MUST render hour slots from 00:00 to 23:00` | MUST | 24 hour labels MUST be visible when scrolling. |
-| V-03 | `Day view MUST render a single day column` | MUST | Switching to day view MUST show one column. |
-| V-04 | `Month view MUST render a calendar grid` | MUST | The grid MUST show 4–6 weeks of days. |
-| V-05 | `Agenda view MUST render a chronological event list` | MUST | Events MUST appear in time order, oldest first. |
-| V-06 | `View toggle MUST switch between all four views` | MUST | Clicking day/week/month/agenda buttons MUST change the rendered view. |
-| V-07 | `Today button MUST navigate to the current date` | MUST | After navigating away, clicking "Today" MUST return to today's date. |
-| V-08 | `Navigation arrows MUST move forward/backward by one unit` | MUST | In week view, forward arrow MUST advance by 7 days. In month view, by one month. |
-| V-09 | `Selected date MUST be visually highlighted` | MUST | The current/selected day MUST have a distinct visual indicator. |
+| V-01 | `Week view MUST render 7 day columns` | MUST | Default view shows Mon–Sun columns. |
+| V-02 | `Week view MUST render hour slots 00:00–23:00` | MUST | 24 hours visible when scrolling. |
+| V-03 | `Day view MUST render a single day column` | MUST | Switch to day → one column. |
+| V-04 | `Month view MUST render a calendar grid of 4–6 weeks` | MUST | Standard month grid. |
+| V-05 | `Agenda view MUST render events in chronological order` | MUST | List sorted by start time. |
+| V-06 | `View toggle MUST switch between all four views` | MUST | All buttons functional. |
+| V-07 | `Today button MUST navigate to current date` | MUST | Returns to today after navigation. |
+| V-08 | `Navigation arrows MUST advance/retreat by view unit` | MUST | Week → ±7 days, month → ±1 month, day → ±1 day. |
 
 #### `events.spec.ts`
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| E-01 | `Clicking an empty time slot MUST open the quick-create popover` | MUST | The popover MUST pre-fill the clicked time. |
-| E-02 | `Quick-create MUST create an event with name and time` | MUST | Typing a name and confirming MUST create an event visible on the grid. |
-| E-03 | `Clicking an event block MUST open the event detail panel` | MUST | The detail panel MUST show all event fields. |
-| E-04 | `Event detail panel MUST allow editing all fields` | MUST | Name, time, location, description, calendar, visibility MUST all be editable. |
-| E-05 | `Saving changes in event detail MUST update the event on the grid` | MUST | The grid MUST reflect the new name/time immediately. |
-| E-06 | `Deleting an event MUST remove it from the grid` | MUST | After confirmation, the event block MUST disappear. |
-| E-07 | `Events MUST be positioned by startDate/endDate on the time grid` | MUST | A 10:00–11:00 event MUST be positioned at the 10am row and span 1 hour. |
-| E-08 | `Events MUST be colored by calendar` | MUST | Events from different calendars MUST have different background colors. |
-| E-09 | `Dragging an event SHOULD move it to a new time slot` | SHOULD | Drag-and-drop SHOULD update startDate/endDate. |
-| E-10 | `Resizing an event SHOULD change its duration` | SHOULD | Dragging the bottom edge SHOULD update endDate. |
-| E-11 | `Events with recurrence MUST display each occurrence in the visible range` | MUST | A weekly event MUST show on each week in a month view. |
+| E-01 | `Clicking empty time slot MUST open quick-create` | MUST | Pre-fills clicked time. |
+| E-02 | `Quick-create MUST create an event visible on the grid` | MUST | Type name, confirm → event appears. |
+| E-03 | `Clicking event block MUST open detail panel` | MUST | Shows all fields. |
+| E-04 | `Saving edits MUST update the grid` | MUST | Changed name/time reflected immediately. |
+| E-05 | `Deleting MUST remove from grid` | MUST | Event block disappears. |
+| E-06 | `Events MUST be positioned by time on the grid` | MUST | 10:00–11:00 → 10am row, 1hr span. |
+| E-07 | `Events MUST be colored by calendar` | MUST | Different calendars → different colors. |
+| E-08 | `Recurring events MUST show each occurrence` | MUST | Weekly event → block per week in view. |
+
+#### `shape-form.spec.ts`
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| SF-01 | `ShapeForm MUST render fields from shape annotations` | MUST | Every non-hidden field annotation MUST produce a form input. |
+| SF-02 | `ShapeForm MUST group fields by annotation group` | MUST | Primary group fields render together, details group together. |
+| SF-03 | `ShapeForm MUST order fields by annotation order` | MUST | Lower order values render first. |
+| SF-04 | `ShapeForm MUST dispatch to correct input component by inputType` | MUST | datetime → DateTimeInput, select → SelectInput, etc. |
+| SF-05 | `ShapeForm MUST show validation errors from declarative rules` | MUST | endDate < startDate → error message from the rule. |
+| SF-06 | `ShapeForm MUST work for any registered shape` | MUST | Render with MeetingRequest or CalendarMeta → correct form. |
 
 #### `calendar-management.spec.ts`
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| C-01 | `Sidebar MUST list all calendars` | MUST | Personal calendar MUST appear on first run. |
-| C-02 | `Creating a new calendar MUST add it to the sidebar` | MUST | New calendar with name and color MUST appear immediately. |
-| C-03 | `Toggling calendar visibility MUST show/hide its events` | MUST | Unchecking a calendar MUST remove its events from the grid. Re-checking MUST restore them. |
-| C-04 | `Calendar color MUST be reflected on event blocks` | MUST | Changing a calendar's color MUST update all its events' colors. |
+| C-01 | `Sidebar MUST list all calendars` | MUST | At least one on first run. |
+| C-02 | `Creating a new calendar MUST add it to sidebar` | MUST | Immediate appearance. |
+| C-03 | `Toggling visibility MUST show/hide events` | MUST | Uncheck → events gone, re-check → restored. |
+| C-04 | `Calendar color MUST be reflected on events` | MUST | Color change → events update. |
 
 #### `ics-import.spec.ts`
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| IC-01 | `Dropping an .ics file on the app MUST trigger import` | MUST | Drag-and-drop of a valid ICS file MUST parse and create events. |
-| IC-02 | `Import MUST create events for each VEVENT in the file` | MUST | A file with 5 VEVENTs MUST produce 5 events. |
-| IC-03 | `Imported events MUST appear on the calendar grid` | MUST | After import, events MUST be visible at their correct times. |
-| IC-04 | `Import MUST reject invalid ICS files with an error message` | MUST | A non-ICS file MUST show an error, not silently fail. |
+| IC-01 | `Dropping .ics file MUST trigger import` | MUST | Drag-and-drop → events created. |
+| IC-02 | `Import MUST create events for each VEVENT` | MUST | 5 VEVENTs → 5 events. |
+| IC-03 | `Imported events MUST appear on the grid` | MUST | Visible at correct times. |
+| IC-04 | `Invalid file MUST show error` | MUST | Non-ICS → user-facing error. |
 
 ---
 
-## Layer 2: Person-to-Person Scheduling
+## Layer 2: Meeting Requests (State Machine)
 
-Peer-to-peer meeting negotiation via shared graphs.
+The request lifecycle is a declarative state machine, not imperative method calls.
 
-### `scheduling/meeting-request.ts`
+### `scheduling/request-transitions.ts`
 
 ```typescript
-export interface MeetingRequestService {
-  /** Create a meeting request → creates a shared graph with the invitee */
-  sendRequest(event: CalendarEvent, toDid: string): Promise<MeetingRequest>
+/**
+ * Declarative state machine for meeting request status transitions.
+ * Each transition defines: fromState → toState, required fields, side effects.
+ */
 
-  /** Accept a pending request → update shared graph, add event to personal calendar */
-  acceptRequest(request: MeetingRequest): Promise<CalendarEvent>
-
-  /** Decline a pending request */
-  declineRequest(request: MeetingRequest): Promise<void>
-
-  /** Counter-propose with alternative times */
-  counterPropose(request: MeetingRequest, newStart: string, newEnd: string, message?: string): Promise<MeetingRequest>
-
-  /** List all pending incoming requests */
-  getIncomingRequests(): Promise<MeetingRequest[]>
-
-  /** List all pending outgoing requests */
-  getOutgoingRequests(): Promise<MeetingRequest[]>
-
-  /** Subscribe to incoming request events */
-  onRequestReceived(callback: (request: MeetingRequest) => void): () => void
+export interface Transition {
+  from: RequestStatus
+  to: RequestStatus
+  requiredFields?: string[]                // fields that MUST be set during this transition
+  sideEffects?: SideEffect[]               // declarative descriptions of what happens
 }
+
+export type SideEffect =
+  | { type: 'createInstance'; shape: string; in: 'personal' | 'shared' }
+  | { type: 'updateInstance'; shape: string; in: 'personal' | 'shared' }
+
+export const REQUEST_TRANSITIONS: Transition[] = [
+  { from: 'pending', to: 'accepted',
+    sideEffects: [
+      { type: 'createInstance', shape: 'Event', in: 'personal' },
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+  { from: 'pending', to: 'declined',
+    sideEffects: [
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+  { from: 'pending', to: 'tentative',
+    sideEffects: [
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+  { from: 'pending', to: 'counter',
+    requiredFields: ['counterStart', 'counterEnd'],
+    sideEffects: [
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+  { from: 'counter', to: 'accepted',
+    sideEffects: [
+      { type: 'createInstance', shape: 'Event', in: 'personal' },
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+  { from: 'counter', to: 'declined',
+    sideEffects: [
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+  { from: 'counter', to: 'counter',
+    requiredFields: ['counterStart', 'counterEnd'],
+    sideEffects: [
+      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
+    ] },
+]
 ```
 
 ### Layer 2 Tests
 
-```
-lib/__tests__/meeting-request.test.ts
-tests/scheduling.spec.ts
-```
-
-#### `meeting-request.test.ts`
-
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| M-01 | `sendRequest() MUST create a shared graph for the meeting` | MUST | A shared graph MUST be created via `graph.share()` containing the MeetingRequest. |
-| M-02 | `sendRequest() MUST create a MeetingRequest instance with status 'pending'` | MUST | The shared graph MUST contain a MeetingRequest with status `pending`. |
-| M-03 | `sendRequest() MUST set 'from' to the organizer's DID` | MUST | The `from` field MUST match the current user's DID. |
-| M-04 | `sendRequest() MUST set 'to' to the invitee's DID` | MUST | The `to` field MUST be the specified DID. |
-| M-05 | `acceptRequest() MUST update the request status to 'accepted'` | MUST | After accepting, the shared graph's MeetingRequest MUST have status `accepted`. |
-| M-06 | `acceptRequest() MUST add the event to the acceptor's personal calendar` | MUST | The accepted event MUST appear in the personal calendar graph. |
-| M-07 | `declineRequest() MUST update the request status to 'declined'` | MUST | After declining, the shared graph's MeetingRequest MUST have status `declined`. |
-| M-08 | `counterPropose() MUST update status to 'counter' with new times` | MUST | The counter-proposal MUST include counterStart and counterEnd. |
-| M-09 | `counterPropose() MAY include a message` | MAY | If provided, the message MUST be stored on the MeetingRequest. |
-| M-10 | `getIncomingRequests() MUST return requests where 'to' matches current DID` | MUST | Only requests addressed to the current user MUST be returned. |
-| M-11 | `getOutgoingRequests() MUST return requests where 'from' matches current DID` | MUST | Only requests sent by the current user MUST be returned. |
+| M-01 | `Transition pending→accepted MUST be in REQUEST_TRANSITIONS` | MUST | Valid transition. |
+| M-02 | `Transition pending→counter MUST require counterStart and counterEnd` | MUST | Missing fields → rejected. |
+| M-03 | `Transition accepted→pending MUST NOT be in REQUEST_TRANSITIONS` | MUST | Invalid backward transition. |
+| M-04 | `Executing pending→accepted MUST create Event in personal graph` | MUST | Side effect fires. |
+| M-05 | `Executing pending→accepted MUST update MeetingRequest in shared graph` | MUST | Side effect fires. |
+| M-06 | `Executing pending→declined MUST NOT create Event in personal graph` | MUST | No Event side effect. |
+| M-07 | `All transitions MUST reference shapes that exist in SHAPE_REGISTRY` | MUST | No orphan shape references. |
+| M-08 | `Initiating a request MUST create a shared graph containing MeetingRequest` | MUST | Shape registered, instance created with status 'pending'. |
+| M-09 | `Transition counter→counter MUST allow re-negotiation` | MUST | Multiple counter-proposals permitted. |
 
 ---
 
-## Layer 3: Free/Busy & Availability
+## Layer 4: Shared Calendars + Governance
 
-### `availability/freebusy.ts`
+### `shared/governance-rules.ts`
 
 ```typescript
-export interface FreeBusyService {
-  /** Generate a FreeBusy window from local events (strips details, keeps time slots) */
-  generateFreeBusy(start: string, end: string, calendarIds?: string[]): Promise<FreeBusyWindow>
-
-  /** Publish FreeBusy to a shared graph (so invitees can see availability) */
-  publishFreeBusy(sharedGraphUuid: string, window: FreeBusyWindow): Promise<void>
-
-  /** Fetch remote FreeBusy from a shared graph */
-  getRemoteFreeBusy(sharedGraphUuid: string, agentDid: string): Promise<FreeBusyWindow | null>
+/**
+ * Declarative role → permission mapping.
+ * The governance engine reads this table — no if/else permission checking.
+ */
+export const ROLE_PERMISSIONS: Record<string, Set<string>> = {
+  admin:  new Set(['create', 'edit', 'delete', 'grant-role', 'revoke-role']),
+  editor: new Set(['create', 'edit']),
+  viewer: new Set([]),
 }
-```
 
-### `availability/slot-finder.ts`
-
-```typescript
-export interface SlotFinderService {
-  /** Find the first mutually free slot of a given duration for all participants */
-  findFreeSlot(
-    participants: FreeBusyWindow[],
-    duration: number,           // minutes
-    searchStart: string,
-    searchEnd: string,
-  ): { start: string; end: string } | null
-}
-```
-
-### Layer 3 Tests
-
-```
-lib/__tests__/freebusy.test.ts
-lib/__tests__/slot-finder.test.ts
-```
-
-#### `freebusy.test.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| F-01 | `generateFreeBusy() MUST produce slots for the specified window` | MUST | The returned FreeBusyWindow MUST cover start to end. |
-| F-02 | `generateFreeBusy() MUST mark time occupied by events as 'busy'` | MUST | Slots overlapping existing events MUST have status `busy`. |
-| F-03 | `generateFreeBusy() MUST mark unoccupied time as 'free'` | MUST | Slots not overlapping any event MUST have status `free`. |
-| F-04 | `generateFreeBusy() MUST NOT reveal event details` | MUST | The output MUST contain only time slots and status — no event names, descriptions, or locations. |
-| F-05 | `generateFreeBusy() MUST respect event visibility` | MUST | Events with visibility `private` MUST still generate `busy` slots. Events with visibility `public` MUST still only produce time-slot data (no details in FreeBusy). |
-| F-06 | `generateFreeBusy() MUST include recurring event occurrences` | MUST | A weekly recurring event MUST produce `busy` slots for each occurrence in the window. |
-| F-07 | `publishFreeBusy() MUST create a FreeBusy shape instance in the shared graph` | MUST | The shared graph MUST contain a FreeBusy instance matching the generated window. |
-
-#### `slot-finder.test.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| SF-01 | `findFreeSlot() MUST return a slot where all participants are free` | MUST | The returned slot MUST NOT overlap any participant's busy time. |
-| SF-02 | `findFreeSlot() MUST return the earliest possible slot` | MUST | If multiple slots exist, the one closest to searchStart MUST be returned. |
-| SF-03 | `findFreeSlot() MUST return null when no slot exists` | MUST | If all time in the search window is occupied, null MUST be returned. |
-| SF-04 | `findFreeSlot() MUST respect the requested duration` | MUST | The returned slot's duration MUST be ≥ the requested duration. |
-| SF-05 | `findFreeSlot() MUST handle participants in different time zones` | MUST | Free/busy times MUST be compared in absolute UTC, regardless of local representation. |
-
----
-
-## Layer 4: Shared Calendars
-
-### `shared/shared-calendar.ts`
-
-```typescript
-export interface SharedCalendarService {
-  /** Create a shared calendar → creates a shared graph with Event shape */
-  createSharedCalendar(name: string, color: string): Promise<{ graphUuid: string; shareUrl: string }>
-
-  /** Join an existing shared calendar by URL */
-  joinSharedCalendar(url: string): Promise<{ graphUuid: string; name: string }>
-
-  /** Leave a shared calendar */
-  leaveSharedCalendar(graphUuid: string, retainLocalCopy?: boolean): Promise<void>
-
-  /** List shared calendars the user belongs to */
-  listSharedCalendars(): Promise<Array<{ graphUuid: string; name: string; shareUrl: string }>>
-
-  /** Get events from a shared calendar */
-  getSharedEvents(graphUuid: string, start: string, end: string): Promise<CalendarEvent[]>
-
-  /** Create an event in a shared calendar */
-  createSharedEvent(graphUuid: string, event: Omit<CalendarEvent, 'uri'>): Promise<CalendarEvent>
-}
-```
-
-### `shared/governance.ts`
-
-```typescript
-export interface CalendarGovernance {
-  /** Grant a role to a DID on a shared calendar */
-  grantRole(graphUuid: string, did: string, role: 'admin' | 'editor' | 'viewer'): Promise<void>
-
-  /** Revoke a role from a DID */
-  revokeRole(graphUuid: string, did: string, role: string): Promise<void>
-
-  /** Check if a DID has a specific permission */
-  canPerform(graphUuid: string, did: string, action: 'create' | 'edit' | 'delete'): Promise<boolean>
-
-  /** List members and their roles */
-  listMembers(graphUuid: string): Promise<Array<{ did: string; roles: string[] }>>
+/**
+ * Check permission by table lookup.
+ */
+export function canPerform(role: string, action: string): boolean {
+  return ROLE_PERMISSIONS[role]?.has(action) ?? false
 }
 ```
 
 ### Layer 4 Tests
 
-```
-lib/__tests__/shared-calendar.test.ts
-lib/__tests__/governance.test.ts
-```
-
-#### `shared-calendar.test.ts`
-
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| SH-01 | `createSharedCalendar() MUST create a shared graph with Event shape` | MUST | The shared graph MUST have the Event shape registered. |
-| SH-02 | `createSharedCalendar() MUST return a share URL` | MUST | The returned shareUrl MUST be usable with `joinSharedCalendar()`. |
-| SH-03 | `joinSharedCalendar() MUST create a local perspective linked to the shared graph` | MUST | After joining, events in the shared graph MUST be queryable locally. |
-| SH-04 | `createSharedEvent() MUST be visible to all members` | MUST | An event created by member A MUST be queryable by member B. |
-| SH-05 | `leaveSharedCalendar() MUST remove the local perspective` | MUST | After leaving, the shared calendar MUST NOT appear in `listSharedCalendars()`. |
-| SH-06 | `leaveSharedCalendar({ retainLocalCopy: true }) MUST keep a local read-only copy` | MUST | Events MUST still be queryable but new sync updates MUST NOT arrive. |
-
-#### `governance.test.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| G-01 | `Admin role MUST allow create, edit, and delete` | MUST | `canPerform()` for all three actions MUST return true for admins. |
-| G-02 | `Editor role MUST allow create and edit but NOT delete` | MUST | Editors MUST be able to create/edit but `canPerform('delete')` MUST return false. |
-| G-03 | `Viewer role MUST NOT allow create, edit, or delete` | MUST | All three `canPerform()` calls MUST return false for viewers. |
-| G-04 | `grantRole() MUST be callable only by admins` | MUST | A non-admin attempting to grant roles MUST be rejected. |
-| G-05 | `Calendar creator MUST automatically receive admin role` | MUST | After `createSharedCalendar()`, the creator's DID MUST have the admin role. |
+| SH-01 | `createSharedCalendar() MUST register Event shape on shared graph` | MUST | Shape exists after creation. |
+| SH-02 | `createSharedCalendar() MUST return a share URL` | MUST | URL usable for joining. |
+| SH-03 | `Events created by member A MUST be queryable by member B` | MUST | Shared graph sync. |
+| SH-04 | `Creator MUST automatically receive admin role` | MUST | Governance triple set on creation. |
+| G-01 | `ROLE_PERMISSIONS admin MUST include create, edit, delete, grant-role, revoke-role` | MUST | Table correctness. |
+| G-02 | `ROLE_PERMISSIONS editor MUST include create, edit but NOT delete` | MUST | Table correctness. |
+| G-03 | `ROLE_PERMISSIONS viewer MUST include nothing` | MUST | Read-only. |
+| G-04 | `canPerform() MUST return false for unknown roles` | MUST | Fail-closed. |
+| G-05 | `Adding a new role to ROLE_PERMISSIONS MUST be sufficient (no code change)` | MUST | The key declarative test. |
 
 ---
 
-## Layer 5: Adoption & Onboarding
+## Layer 5: Onboarding
 
-### `interop/import-wizard.ts`
-
-```typescript
-export interface ImportWizard {
-  /** Import events from an ICS file */
-  importICSFile(file: File, targetCalendarId: string): Promise<{ imported: number; skipped: number }>
-
-  /** Import from Google Calendar export (Takeout ZIP) */
-  importGoogleTakeout(file: File): Promise<{ imported: number; calendars: number }>
-}
-```
-
-### `interop/natural-language.ts`
+### `onboarding/natural-language.ts`
 
 ```typescript
-export interface NaturalLanguageParser {
-  /** Parse a quick-add string into event fields */
-  parse(input: string, referenceDate?: string): Partial<CalendarEvent> | null
+/**
+ * Pattern-based parser. Rules are declared as patterns, not procedural code.
+ */
+export interface NLPattern {
+  pattern: RegExp
+  extract: Record<string, number>          // shape property name → capture group index
+  transform?: Record<string, (raw: string, refDate: string) => string>
 }
+
+export const NL_PATTERNS: NLPattern[] = [
+  {
+    pattern: /^(.+?)\s+(?:at|@)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*$/i,
+    extract: { name: 1, startDate: 2 },
+    transform: { startDate: parseTimeRelative },
+  },
+  // ... more patterns
+]
 ```
 
 ### Layer 5 Tests
 
-```
-lib/__tests__/natural-language.test.ts
-```
-
-#### `natural-language.test.ts`
-
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| NL-01 | `"Coffee tomorrow at 10am" MUST parse name and startDate` | MUST | Name MUST be "Coffee", startDate MUST be tomorrow at 10:00. |
-| NL-02 | `"Meeting with Nico 3pm-4pm Friday" MUST parse name, start, and end` | MUST | Name MUST be "Meeting with Nico", times MUST be correct for the coming Friday. |
-| NL-03 | `"Dentist next Tuesday" MUST parse name and date` | MUST | Date MUST resolve to the next Tuesday from the reference date. |
-| NL-04 | `Unparseable input MUST return null` | MUST | Random strings with no time/date signals MUST return null, not throw. |
-| NL-05 | `"Weekly standup every Monday 9am" SHOULD parse recurrence` | SHOULD | If supported, the result SHOULD include an RRULE-compatible recurrence string. |
+| NL-01 | `"Coffee tomorrow at 10am" MUST parse name and startDate` | MUST | Pattern match + time resolution. |
+| NL-02 | `"Meeting with Nico 3pm-4pm Friday" MUST parse name, start, end` | MUST | Range pattern. |
+| NL-03 | `"Dentist next Tuesday" MUST parse name and date` | MUST | Relative date resolution. |
+| NL-04 | `Unparseable input MUST return null` | MUST | No match → null, not throw. |
+| NL-05 | `Adding a new NL_PATTERN MUST be sufficient to handle new formats (no code change)` | MUST | Declarative extensibility. |
 
 ---
 
@@ -725,45 +912,29 @@ lib/__tests__/natural-language.test.ts
 
 ### Mock Graph Backend
 
-A lightweight in-memory implementation of the Living Web `PersonalGraph` / `PersonalGraphManager` interface, used by unit tests. This avoids the need for a running AD4M executor during development and CI.
+In-memory implementation of the Living Web `PersonalGraph` / `PersonalGraphManager` interface. Shape-aware: validates against registered shape definitions.
 
-```typescript
-// lib/__tests__/helpers/mock-graph.ts
-export class MockPersonalGraph extends EventTarget {
-  private triples: Map<string, SignedTriple> = new Map()
-  private shapes: Map<string, ShapeDefinition> = new Map()
-  readonly uuid: string
-  readonly name: string | null
+### Declarative Invariant Tests
 
-  async addTriple(triple: SemanticTriple): Promise<SignedTriple> { /* ... */ }
-  async removeTriple(signed: SignedTriple): Promise<boolean> { /* ... */ }
-  async queryTriples(query: TripleQuery): Promise<SignedTriple[]> { /* ... */ }
-  async addShape(name: string, json: string): Promise<void> { /* ... */ }
-  async createShapeInstance(name: string, addr: string, params?: Record<string, unknown>): Promise<string> { /* ... */ }
-  // ... etc
-}
+In addition to the per-module tests above, a suite of *structural invariant tests* verifies the declarative properties hold:
 
-export class MockGraphManager {
-  async create(name?: string): Promise<MockPersonalGraph> { /* ... */ }
-  async list(): Promise<MockPersonalGraph[]> { /* ... */ }
-  async get(uuid: string): Promise<MockPersonalGraph | null> { /* ... */ }
-  async remove(uuid: string): Promise<boolean> { /* ... */ }
-}
-```
-
-### Integration Tests
-
-For full-stack integration testing against a real AD4M executor, a separate test config points the polyfill at a running executor. These are **not** run in CI — they're a manual verification step.
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| D-01 | `No module outside data/shapes/ may contain a predicate URI string literal` | MUST | Predicates come from shape definitions only. |
+| D-02 | `No module outside data/derivations/ may contain hardcoded default values` | MUST | Defaults come from annotations only. |
+| D-03 | `instance-ops.ts MUST NOT import any specific shape definition` | MUST | It reads from the registry, never from `event.ts` directly. |
+| D-04 | `ShapeForm.tsx MUST NOT import any specific shape definition` | MUST | It reads from the registry via context. |
+| D-05 | `Every ICS field mapping MUST be testable by adding one table entry` | MUST | No per-field conversion functions. |
 
 ---
 
 ## Implementation Order
 
-1. **Layer 0** — Data foundation. No UI. All unit tests passing.
-2. **Layer 1** — UI on top of Layer 0. E2E tests for views, events, calendar management.
-3. **Layer 2** — Meeting requests. Unit + E2E.
-4. **Layer 3** — Free/busy. Unit tests.
-5. **Layer 4** — Shared calendars. Unit tests.
-6. **Layer 5** — Onboarding. Natural language parser unit tests.
+1. **Layer 0** — Shapes, annotations, engine, transforms, pipelines. All unit tests green.
+2. **Layer 1** — Shape-driven UI: ShapeForm, views, event blocks. E2E tests green.
+3. **Layer 2** — State machine for meeting requests. Unit tests green.
+4. **Layer 3** (Free/busy transforms are already in Layer 0 — this layer adds the publishing/overlay UI).
+5. **Layer 4** — Shared calendars + governance table. Unit tests green.
+6. **Layer 5** — NL patterns, import wizard. Unit tests green.
 
-Each layer is a clean milestone. No layer starts until the previous one's tests are green.
+Each layer is a milestone. No layer starts until the previous one's tests are green.
