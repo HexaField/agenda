@@ -14,6 +14,7 @@
 4. **UI is shape-driven.** Event detail forms are rendered by iterating shape properties, not by hand-coding a field per property. Rendering hints (input type, display order, grouping) are annotations on the shape, not in component code.
 5. **Operations are generic.** `createInstance`, `updateInstance`, `deleteInstance` work on *any* shape. Calendar-specific logic (defaults, validation rules like endDate > startDate) is expressed as declarative rules attached to the shape, not as method bodies.
 6. **Pipelines, not procedures.** Data flows through declarative transformation pipelines: `shape → query → graph → instances → expand recurrences → filter visible calendars → render`. Each stage is a pure function of its inputs.
+7. **Backend-agnostic.** A `GraphAdapter` interface abstracts all graph operations. Two implementations: one for the Living Web browser API (`navigator.graph`), one for AD4M's GraphQL API directly. The rest of the app never knows which backend is running.
 
 ---
 
@@ -21,10 +22,11 @@
 
 | Package | Purpose |
 |---------|---------|
-| `@living-web/ad4m-polyfill` | `navigator.graph` + `navigator.credentials` backed by AD4M executor |
 | `solid-js` | Reactive UI framework |
 | `tailwindcss` | Styling |
 | `ical.js` | ICS parsing/generation (VEVENT, RRULE, VALARM) |
+
+No polyfill dependency at the package level. The Living Web adapter uses the global `navigator.graph` API (installed by any polyfill or native browser). The AD4M adapter uses `fetch` against the executor's GraphQL endpoint directly.
 
 ---
 
@@ -35,7 +37,14 @@ packages/client/
 ├── src/
 │   ├── index.tsx                          # App mount
 │   ├── index.css                          # Tailwind + base styles
-│   ├── App.tsx                            # Root: bootstrap graph, provide context
+│   ├── App.tsx                            # Root: detect backend, bootstrap, provide context
+│   │
+│   ├── adapter/                           # Backend abstraction layer
+│   │   ├── types.ts                       # GraphAdapter interface + supporting types
+│   │   ├── living-web.ts                  # LivingWebAdapter: implements GraphAdapter via navigator.graph
+│   │   ├── ad4m.ts                        # AD4MAdapter: implements GraphAdapter via GraphQL to executor
+│   │   ├── detect.ts                      # Auto-detect available backend, instantiate adapter
+│   │   └── mock.ts                        # MockAdapter: in-memory, for tests
 │   │
 │   ├── data/                              # Layer 0 — Declarative Data Foundation
 │   │   ├── shapes/                        # Shape definitions (the single source of truth)
@@ -45,19 +54,19 @@ packages/client/
 │   │   │   ├── calendar-meta.ts           # CALENDAR_META_SHAPE definition + annotations
 │   │   │   └── index.ts                   # Shape registry (all shapes, lookup by name)
 │   │   │
-│   │   ├── engine/                        # Generic, shape-agnostic graph operations
-│   │   │   ├── graph-context.ts           # Bootstrap graph, register shapes, provide to app
-│   │   │   ├── instance-ops.ts            # Generic CRUD: create/get/update/delete any shape instance
+│   │   ├── engine/                        # Generic, shape-agnostic operations (uses GraphAdapter)
+│   │   │   ├── graph-context.ts           # Bootstrap: create graph via adapter, register shapes, provide context
+│   │   │   ├── instance-ops.ts            # Generic CRUD: create/get/update/delete via adapter
 │   │   │   ├── query-builder.ts           # Build queries from shape metadata + filter params
-│   │   │   └── subscriptions.ts           # Generic event listeners on graph changes
+│   │   │   └── subscriptions.ts           # Event listeners via adapter.subscribe()
 │   │   │
 │   │   ├── derivations/                   # Shape-derived utilities (all take shape as input)
-│   │   │   ├── type-gen.ts                # Derive TypeScript types/validators from shape properties
-│   │   │   ├── defaults.ts                # Declarative default-value rules per shape
-│   │   │   ├── validation-rules.ts        # Declarative validation rules (e.g. endDate > startDate)
-│   │   │   └── ics-mapping.ts             # ICS ↔ shape field mapping table
+│   │   │   ├── types.ts                   # ShapeAnnotations, FieldAnnotation, ValidationRule types
+│   │   │   ├── defaults.ts                # Apply defaults from annotations before create
+│   │   │   ├── validation-rules.ts        # Validate data against shape + annotation rules
+│   │   │   └── ics-mapping.ts             # ICS ↔ shape field mapping (driven by annotation table)
 │   │   │
-│   │   ├── transforms/                    # Pure data transformation pipelines
+│   │   ├── transforms/                    # Pure data transformations (no adapter access)
 │   │   │   ├── ics.ts                     # ICS import/export (driven by ics-mapping table)
 │   │   │   ├── rrule.ts                   # RRULE parsing + occurrence expansion
 │   │   │   ├── freebusy-gen.ts            # Events → FreeBusy slots (pure projection)
@@ -85,7 +94,7 @@ packages/client/
 │   │   ├── forms/                         # Generic shape-driven form components
 │   │   │   ├── ShapeForm.tsx              # Renders a form from any shape definition + annotations
 │   │   │   ├── FieldRenderer.tsx          # Dispatches to input type by shape property datatype
-│   │   │   └── field-registry.ts          # Maps datatype → input component (declarative)
+│   │   │   └── field-registry.ts          # Maps inputType → component (declarative)
 │   │   ├── components/
 │   │   │   ├── TimeGrid.tsx               # Shared hour-slot grid
 │   │   │   ├── DatePicker.tsx             # Mini calendar
@@ -94,16 +103,16 @@ packages/client/
 │   │   └── state/
 │   │       ├── view-state.ts              # Current view, date, range (SolidJS store)
 │   │       ├── calendar-state.ts          # Visible calendars, calendar metadata (SolidJS store)
-│   │       └── event-state.ts             # Reactive query results (derived from view-state + graph)
+│   │       └── event-state.ts             # Reactive query results (derived from view-state + adapter)
 │   │
 │   ├── scheduling/                        # Layer 2 — Person-to-Person Scheduling
-│   │   ├── invite-flow.ts                 # Declarative flow: event+attendee → shared graph → MeetingRequest
-│   │   ├── request-transitions.ts         # State machine: pending → accepted/declined/counter
+│   │   ├── invite-flow.ts                 # event+attendee → shared graph → MeetingRequest
+│   │   ├── request-transitions.ts         # Declarative state machine
 │   │   ├── InvitePanel.tsx                # Incoming/outgoing request list
 │   │   └── ContactPicker.tsx              # DID search
 │   │
 │   ├── shared/                            # Layer 4 — Shared Calendars
-│   │   ├── shared-calendar-ops.ts         # Create/join/leave (delegates to graph.share/join)
+│   │   ├── shared-calendar-ops.ts         # Create/join/leave via adapter.share()/join()
 │   │   ├── governance-rules.ts            # Declarative role→permission mapping table
 │   │   └── SharedCalendarSettings.tsx     # Membership + role management UI
 │   │
@@ -121,19 +130,620 @@ packages/client/
 
 ---
 
+## The Adapter Layer
+
+### `adapter/types.ts` — The Contract
+
+This is the interface the entire app codes against. Both backends implement it fully.
+
+```typescript
+/**
+ * GraphAdapter — the single abstraction between Agenda and the graph backend.
+ *
+ * Implements: graph lifecycle, shape registration, instance CRUD,
+ * property operations, queries, subscriptions, identity, and sharing.
+ *
+ * Two implementations:
+ *   LivingWebAdapter — talks to navigator.graph (polyfill or native browser)
+ *   AD4MAdapter      — talks to AD4M executor via GraphQL over HTTP/WS
+ *
+ * The rest of Agenda never imports from either implementation directly.
+ */
+
+// ── Graph Lifecycle ──
+
+export interface GraphAdapter {
+  /**
+   * Create a new personal graph.
+   * Living Web: navigator.graph.create(name)
+   * AD4M: mutation { perspectiveAdd(name) { uuid name } }
+   */
+  createGraph(name?: string): Promise<GraphHandle>
+
+  /**
+   * List all personal graphs.
+   * Living Web: navigator.graph.list()
+   * AD4M: query { perspectives { uuid name sharedUrl } } (filter sharedUrl === null)
+   */
+  listGraphs(): Promise<GraphHandle[]>
+
+  /**
+   * Get a graph by ID.
+   * Living Web: navigator.graph.get(id)
+   * AD4M: query { perspective(uuid) { uuid name } }
+   */
+  getGraph(id: string): Promise<GraphHandle | null>
+
+  /**
+   * Remove a graph permanently.
+   * Living Web: navigator.graph.remove(id)
+   * AD4M: mutation { perspectiveRemove(uuid) }
+   */
+  removeGraph(id: string): Promise<boolean>
+
+  // ── Shape Registration ──
+
+  /**
+   * Register a shape definition on a graph.
+   * Living Web: graph.addShape(name, json)
+   * AD4M: mutation { perspectiveAddSdna(uuid, name, sdnaCode, sdnaType: "subject_class") }
+   */
+  registerShape(graphId: string, name: string, shape: ShapeDefinition): Promise<void>
+
+  /**
+   * List registered shape names on a graph.
+   * Living Web: graph.getShapes()
+   * AD4M: query shacl://has_shape links
+   */
+  listShapes(graphId: string): Promise<string[]>
+
+  // ── Instance CRUD ──
+
+  /**
+   * Create a shape instance.
+   * Living Web: graph.createShapeInstance(shapeName, uri, data)
+   * AD4M: mutation { perspectiveCreateSubject(uuid, subjectClass, exprAddr, initialValues) }
+   */
+  createInstance(
+    graphId: string,
+    shapeName: string,
+    uri: string,
+    data: Record<string, unknown>,
+  ): Promise<string>
+
+  /**
+   * Get instance data.
+   * Living Web: graph.getShapeInstanceData(shapeName, uri)
+   * AD4M: mutation { perspectiveGetSubjectData(uuid, subjectClass, exprAddr) }
+   */
+  getInstance(
+    graphId: string,
+    shapeName: string,
+    uri: string,
+  ): Promise<Record<string, unknown> | null>
+
+  /**
+   * List all instance URIs for a shape.
+   * Living Web: graph.getShapeInstances(shapeName)
+   * AD4M: query links with predicate rdf://type matching shape's targetClass
+   */
+  listInstances(graphId: string, shapeName: string): Promise<string[]>
+
+  /**
+   * Set a scalar property on an instance.
+   * Living Web: graph.setShapeProperty(shapeName, uri, property, value)
+   * AD4M: remove old link + add new link for the predicate
+   */
+  setProperty(
+    graphId: string,
+    shapeName: string,
+    uri: string,
+    property: string,
+    value: unknown,
+  ): Promise<void>
+
+  /**
+   * Add a value to a collection property.
+   * Living Web: graph.addToShapeCollection(shapeName, uri, collection, value)
+   * AD4M: perspectiveAddLink with the collection predicate
+   */
+  addToCollection(
+    graphId: string,
+    shapeName: string,
+    uri: string,
+    collection: string,
+    value: string,
+  ): Promise<void>
+
+  /**
+   * Remove a value from a collection property.
+   * Living Web: graph.removeFromShapeCollection(shapeName, uri, collection, value)
+   * AD4M: find and remove the specific link
+   */
+  removeFromCollection(
+    graphId: string,
+    shapeName: string,
+    uri: string,
+    collection: string,
+    value: string,
+  ): Promise<void>
+
+  /**
+   * Delete an instance (remove all its triples).
+   * Living Web: remove all triples where source = uri
+   * AD4M: query all links with source = uri, remove each
+   */
+  deleteInstance(graphId: string, uri: string): Promise<boolean>
+
+  // ── Queries ──
+
+  /**
+   * Query triples with filters.
+   * Living Web: graph.queryTriples(query)
+   * AD4M: query { perspectiveQueryLinks(uuid, query) }
+   */
+  queryTriples(graphId: string, query: TripleQuery): Promise<SignedTriple[]>
+
+  /**
+   * Execute a SPARQL query.
+   * Living Web: graph.querySparql(sparql)
+   * AD4M: query { perspectiveSparqlQuery(uuid, query) }
+   */
+  querySparql(graphId: string, sparql: string): Promise<SparqlResult>
+
+  // ── Subscriptions ──
+
+  /**
+   * Subscribe to triple changes on a graph.
+   * Living Web: graph.addEventListener('tripleadded'/'tripleremoved', cb)
+   * AD4M: subscription { perspectiveLinkAdded/perspectiveLinkRemoved(uuid) }
+   */
+  subscribe(
+    graphId: string,
+    event: 'tripleadded' | 'tripleremoved',
+    callback: (triple: SignedTriple) => void,
+  ): Unsubscribe
+
+  // ── Identity ──
+
+  /**
+   * Get the current user's DID.
+   * Living Web: navigator.credentials.get({ type: 'did' })
+   * AD4M: query { agent { did } }
+   */
+  getIdentity(): Promise<{ did: string } | null>
+
+  // ── Sharing (for Layers 2–4) ──
+
+  /**
+   * Share a graph as a peer-to-peer shared graph.
+   * Living Web: graph.share(opts)
+   * AD4M: mutation { neighbourhoodPublishFromPerspective(uuid, linkLanguage, meta) }
+   */
+  shareGraph(graphId: string, opts?: ShareOptions): Promise<SharedGraphHandle>
+
+  /**
+   * Join an existing shared graph by URL.
+   * Living Web: navigator.graph.join(url)
+   * AD4M: mutation { neighbourhoodJoinFromUrl(url) }
+   */
+  joinGraph(url: string): Promise<SharedGraphHandle>
+
+  /**
+   * Get online peers for a shared graph.
+   * Living Web: shared.peers()
+   * AD4M: query { neighbourhoodOnlineAgents(perspectiveUUID) }
+   */
+  getPeers(graphId: string): Promise<string[]>
+}
+
+// ── Supporting Types ──
+
+export interface GraphHandle {
+  id: string             // UUID
+  name: string | null
+}
+
+export interface SharedGraphHandle extends GraphHandle {
+  url: string            // share URL / neighbourhood URL
+}
+
+export interface ShareOptions {
+  name?: string
+  module?: string        // sync module / link language hash
+}
+
+export type Unsubscribe = () => void
+
+/** Reused from Living Web spec — backend-agnostic */
+export interface SemanticTriple {
+  source: string
+  target: string
+  predicate: string | null
+}
+
+export interface SignedTriple {
+  data: SemanticTriple
+  author: string
+  timestamp: string
+  proof: { key: string; signature: string }
+}
+
+export interface TripleQuery {
+  source?: string | null
+  predicate?: string | null
+  target?: string | null
+  fromDate?: string | null
+  untilDate?: string | null
+  limit?: number | null
+}
+
+export interface SparqlResult {
+  type: 'bindings' | 'graph'
+  bindings: Record<string, string>[]
+  triples?: SemanticTriple[]
+}
+
+export interface ShapeDefinition {
+  targetClass: string
+  properties: ShapeProperty[]
+  constructor: ShapeConstructorAction[]
+}
+
+export interface ShapeProperty {
+  path: string
+  name: string
+  datatype?: string
+  minCount?: number
+  maxCount?: number
+}
+
+export interface ShapeConstructorAction {
+  action: string
+  source: string
+  predicate: string
+  target: string
+}
+```
+
+### `adapter/detect.ts` — Backend Detection
+
+```typescript
+/**
+ * Auto-detect which backend is available. Priority:
+ *
+ * 1. AD4M executor (if reachable at configured URL) — richer feature set,
+ *    native SPARQL, Holochain P2P, persistent identity.
+ * 2. Living Web API (if navigator.graph exists) — browser-native or polyfill.
+ * 3. Fallback: throw with a clear error message.
+ *
+ * Can also be forced via config:
+ *   { backend: 'ad4m', executorUrl: '...' }
+ *   { backend: 'living-web' }
+ */
+
+export interface AdapterConfig {
+  backend?: 'ad4m' | 'living-web' | 'auto'
+  /** AD4M executor GraphQL endpoint (default: http://localhost:12000/graphql) */
+  executorUrl?: string
+  /** AD4M auth token */
+  authToken?: string
+  /** AD4M agent passphrase for auto-unlock */
+  passphrase?: string
+}
+
+export async function createAdapter(config?: AdapterConfig): Promise<GraphAdapter>
+```
+
+### `adapter/living-web.ts` — Living Web Implementation
+
+```typescript
+/**
+ * Implements GraphAdapter by delegating to navigator.graph (the Living Web browser API).
+ *
+ * Works with:
+ *   - Native browser support (Chromium fork)
+ *   - Standalone polyfills (@living-web/personal-graph etc.)
+ *   - AD4M polyfill (@living-web/ad4m-polyfill) — but if you have the polyfill,
+ *     you might prefer the AD4M adapter directly for richer features.
+ *   - Chrome extension that injects the polyfills
+ *
+ * The adapter holds no state beyond references to PersonalGraph objects.
+ * All persistence is handled by the browser API / polyfill.
+ */
+export class LivingWebAdapter implements GraphAdapter {
+  private graphs: Map<string, PersonalGraph> = new Map()
+
+  async createGraph(name?: string): Promise<GraphHandle> {
+    const graph = await navigator.graph!.create(name)
+    this.graphs.set(graph.uuid, graph)
+    return { id: graph.uuid, name: graph.name }
+  }
+
+  async registerShape(graphId: string, name: string, shape: ShapeDefinition): Promise<void> {
+    const graph = await this.resolve(graphId)
+    await graph.addShape(name, JSON.stringify(shape))
+  }
+
+  async createInstance(graphId: string, shapeName: string, uri: string, data: Record<string, unknown>): Promise<string> {
+    const graph = await this.resolve(graphId)
+    return graph.createShapeInstance(shapeName, uri, data)
+  }
+
+  async getInstance(graphId: string, shapeName: string, uri: string): Promise<Record<string, unknown> | null> {
+    const graph = await this.resolve(graphId)
+    return graph.getShapeInstanceData(shapeName, uri)
+  }
+
+  // ... etc — each method delegates to the corresponding navigator.graph call
+
+  private async resolve(graphId: string): Promise<PersonalGraph> {
+    if (this.graphs.has(graphId)) return this.graphs.get(graphId)!
+    const graph = await navigator.graph!.get(graphId)
+    if (!graph) throw new Error(`Graph ${graphId} not found`)
+    this.graphs.set(graphId, graph)
+    return graph
+  }
+}
+```
+
+### `adapter/ad4m.ts` — AD4M Direct Implementation
+
+```typescript
+/**
+ * Implements GraphAdapter by talking directly to the AD4M executor
+ * via GraphQL over HTTP (queries/mutations) and WebSocket (subscriptions).
+ *
+ * Advantages over going through the Living Web polyfill:
+ *   - Native SPARQL via Oxigraph (full query power, not the polyfill's basic subset)
+ *   - Direct subject class operations (perspectiveCreateSubject, perspectiveGetSubjectData)
+ *   - WebSocket subscriptions for real-time (perspectiveLinkAdded/Removed)
+ *   - Agent identity managed by executor (persistent across sessions)
+ *   - Holochain-based P2P sync (no WebRTC fallback needed)
+ *   - No polyfill overhead — one fewer abstraction layer
+ *
+ * Requires a running AD4M executor (typically localhost:12000).
+ */
+export class AD4MAdapter implements GraphAdapter {
+  private url: string
+  private wsUrl: string
+  private headers: Record<string, string>
+
+  constructor(config: { executorUrl: string; wsUrl?: string; authToken?: string }) {
+    this.url = config.executorUrl
+    this.wsUrl = config.wsUrl ?? config.executorUrl.replace('http', 'ws')
+    this.headers = { 'Content-Type': 'application/json' }
+    if (config.authToken) this.headers['Authorization'] = `Bearer ${config.authToken}`
+  }
+
+  async createGraph(name?: string): Promise<GraphHandle> {
+    const data = await this.gql<{ perspectiveAdd: { uuid: string; name: string } }>(
+      `mutation($name: String!) { perspectiveAdd(name: $name) { uuid name } }`,
+      { name: name ?? '' },
+    )
+    return { id: data.perspectiveAdd.uuid, name: data.perspectiveAdd.name }
+  }
+
+  async registerShape(graphId: string, name: string, shape: ShapeDefinition): Promise<void> {
+    await this.gql(
+      `mutation($uuid: String!, $name: String!, $sdna: String!) {
+        perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdna, sdnaType: "subject_class")
+      }`,
+      { uuid: graphId, name, sdna: JSON.stringify(shape) },
+    )
+  }
+
+  async createInstance(graphId: string, shapeName: string, uri: string, data: Record<string, unknown>): Promise<string> {
+    const result = await this.gql<{ perspectiveCreateSubject: string }>(
+      `mutation($uuid: String!, $class: String!, $addr: String!, $vals: JSON) {
+        perspectiveCreateSubject(uuid: $uuid, subjectClass: $class, exprAddr: $addr, initialValues: $vals)
+      }`,
+      { uuid: graphId, class: shapeName, addr: uri, vals: data },
+    )
+    return result.perspectiveCreateSubject
+  }
+
+  async querySparql(graphId: string, sparql: string): Promise<SparqlResult> {
+    // AD4M has native Oxigraph SPARQL — use it directly
+    const data = await this.gql<{ perspectiveSparqlQuery: string }>(
+      `query($uuid: String!, $query: String!) {
+        perspectiveSparqlQuery(uuid: $uuid, query: $query)
+      }`,
+      { uuid: graphId, query: sparql },
+    )
+    // Parse Oxigraph's response format
+    const parsed = JSON.parse(data.perspectiveSparqlQuery)
+    // ... normalize to SparqlResult
+  }
+
+  subscribe(graphId: string, event: 'tripleadded' | 'tripleremoved', callback: (t: SignedTriple) => void): Unsubscribe {
+    // WebSocket subscription to perspectiveLinkAdded / perspectiveLinkRemoved
+    // ...
+  }
+
+  async getIdentity(): Promise<{ did: string } | null> {
+    const data = await this.gql<{ agent: { did: string | null } }>(
+      `query { agent { did isUnlocked } }`,
+    )
+    return data.agent.did ? { did: data.agent.did } : null
+  }
+
+  async shareGraph(graphId: string, opts?: ShareOptions): Promise<SharedGraphHandle> {
+    const meta = opts?.name ? [{ data: { source: 'self', predicate: 'name', target: opts.name }, author: '', timestamp: '', proof: { key: '', signature: '', valid: true } }] : []
+    const data = await this.gql<{ neighbourhoodPublishFromPerspective: string }>(
+      `mutation($uuid: String!, $ll: String!, $meta: PerspectiveInput!) {
+        neighbourhoodPublishFromPerspective(perspectiveUUID: $uuid, linkLanguage: $ll, meta: $meta)
+      }`,
+      { uuid: graphId, ll: opts?.module ?? '', meta: { links: meta } },
+    )
+    return { id: graphId, name: opts?.name ?? null, url: data.neighbourhoodPublishFromPerspective }
+  }
+
+  // ... etc
+
+  private async gql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+    const res = await fetch(this.url, {
+      method: 'POST',
+      headers: this.headers,
+      body: JSON.stringify({ query, variables }),
+    })
+    const json = await res.json() as { data?: T; errors?: Array<{ message: string }> }
+    if (json.errors?.length) throw new Error(json.errors[0].message)
+    return json.data as T
+  }
+}
+```
+
+### `adapter/mock.ts` — Test Backend
+
+```typescript
+/**
+ * In-memory GraphAdapter for unit and E2E tests.
+ * No network, no executor, no polyfill — pure JS.
+ *
+ * Shape-aware: validates against registered shape definitions.
+ * Fires subscription callbacks synchronously for deterministic tests.
+ */
+export class MockAdapter implements GraphAdapter {
+  private graphs: Map<string, MockGraph> = new Map()
+
+  // ... full in-memory implementation of every GraphAdapter method
+}
+
+interface MockGraph {
+  id: string
+  name: string | null
+  shapes: Map<string, ShapeDefinition>
+  instances: Map<string, { shapeName: string; data: Record<string, unknown> }>
+  listeners: Map<string, Set<(triple: SignedTriple) => void>>
+}
+```
+
+---
+
+## How the Adapter Connects to the Engine
+
+The engine layer (`instance-ops.ts`, `query-builder.ts`, `subscriptions.ts`) receives a `GraphAdapter` via SolidJS context. It never knows or cares which backend is running.
+
+```
+┌─────────────────────────────────────────────┐
+│                     UI                       │
+│   ShapeForm, WeekView, EventBlock, etc.     │
+└──────────────────┬──────────────────────────┘
+                   │ uses
+┌──────────────────┴──────────────────────────┐
+│              Engine (InstanceOps)             │
+│   create / get / update / delete / query     │
+│   + validation + defaults + pipelines        │
+└──────────────────┬──────────────────────────┘
+                   │ calls
+┌──────────────────┴──────────────────────────┐
+│           GraphAdapter interface             │
+│   createGraph, registerShape,                │
+│   createInstance, getInstance, setProperty,  │
+│   queryTriples, querySparql, subscribe,      │
+│   getIdentity, shareGraph, joinGraph         │
+└──────┬──────────────┬──────────────┬────────┘
+       │              │              │
+┌──────┴─────┐ ┌──────┴─────┐ ┌─────┴──────┐
+│ LivingWeb  │ │   AD4M     │ │   Mock     │
+│ Adapter    │ │  Adapter   │ │  Adapter   │
+│            │ │            │ │            │
+│ navigator  │ │  GraphQL   │ │ In-memory  │
+│  .graph    │ │  HTTP/WS   │ │   Maps     │
+└────────────┘ └────────────┘ └────────────┘
+```
+
+**Bootstrap flow (App.tsx):**
+
+```typescript
+const adapter = await createAdapter({ backend: 'auto' })
+// 1. 'auto' tries AD4M executor at localhost:12000 first
+// 2. Falls back to navigator.graph if executor unreachable
+// 3. Throws if neither available
+
+const engine = new InstanceOpsImpl(adapter, SHAPE_REGISTRY)
+await engine.bootstrap('My Calendar')  // creates/finds graph, registers all shapes
+
+// Provide via SolidJS context
+<AdapterContext.Provider value={adapter}>
+  <EngineContext.Provider value={engine}>
+    <Shell />
+  </EngineContext.Provider>
+</AdapterContext.Provider>
+```
+
+---
+
+## Adapter Tests
+
+The adapter interface has its own conformance test suite. Each test runs against **all three implementations** (Living Web, AD4M, Mock) via a parameterized test factory.
+
+```
+adapter/__tests__/
+├── adapter-conformance.test.ts    # parameterized: runs against all adapters
+├── living-web.test.ts             # Living Web-specific edge cases
+├── ad4m.test.ts                   # AD4M-specific edge cases
+└── detect.test.ts                 # Backend detection logic
+```
+
+### `adapter-conformance.test.ts` — Adapter Contract Tests
+
+These tests define the contract. Every adapter MUST pass all of them.
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| A-01 | `createGraph() MUST return a GraphHandle with a unique id` | MUST | Two calls MUST return different ids. |
+| A-02 | `createGraph(name) MUST store the name` | MUST | `getGraph(id).name` MUST equal the provided name. |
+| A-03 | `listGraphs() MUST return all created graphs` | MUST | After creating 3 graphs, list MUST return all 3. |
+| A-04 | `getGraph() MUST return null for unknown id` | MUST | Non-existent UUID → null. |
+| A-05 | `removeGraph() MUST delete the graph` | MUST | After remove, `getGraph()` MUST return null. |
+| A-06 | `removeGraph() MUST return true for existing, false for non-existent` | MUST | Matches expected semantics. |
+| A-07 | `registerShape() MUST make the shape queryable via listShapes()` | MUST | After registering "Event", `listShapes()` MUST include "Event". |
+| A-08 | `registerShape() with duplicate name MUST throw or be idempotent` | MUST | Adapter MUST either reject the duplicate or silently accept it. |
+| A-09 | `createInstance() MUST persist instance data` | MUST | After create, `getInstance()` MUST return the data. |
+| A-10 | `createInstance() MUST return the URI` | MUST | Returned URI MUST match the provided URI. |
+| A-11 | `getInstance() MUST return null for unknown URI` | MUST | Non-existent instance → null. |
+| A-12 | `listInstances() MUST return all created instance URIs for a shape` | MUST | After creating 3 Events, list MUST return 3 URIs. |
+| A-13 | `setProperty() MUST update the value` | MUST | After set, `getInstance()` MUST reflect the new value. |
+| A-14 | `setProperty() MUST NOT affect other properties` | MUST | Updating `name` MUST NOT change `startDate`. |
+| A-15 | `addToCollection() MUST append to the collection` | MUST | After add, collection MUST include the new value. |
+| A-16 | `addToCollection() MUST allow multiple values` | MUST | Adding 3 attendees → collection has 3 entries. |
+| A-17 | `removeFromCollection() MUST remove the specific value` | MUST | After remove, collection MUST NOT include the value. |
+| A-18 | `deleteInstance() MUST remove the instance` | MUST | After delete, `getInstance()` MUST return null. |
+| A-19 | `deleteInstance() MUST return true for existing, false for non-existent` | MUST | Standard semantics. |
+| A-20 | `queryTriples() MUST return matching triples` | MUST | Query by predicate MUST return only triples with that predicate. |
+| A-21 | `subscribe('tripleadded') MUST fire when a triple is added` | MUST | Creating an instance MUST trigger the callback. |
+| A-22 | `subscribe() MUST return an unsubscribe function that stops callbacks` | MUST | After unsubscribe, no more callbacks. |
+| A-23 | `getIdentity() MUST return a DID or null` | MUST | Not undefined, not throw. |
+
+### `detect.test.ts` — Backend Detection
+
+| # | Test | Level | Description |
+|---|------|-------|-------------|
+| D-01 | `backend: 'ad4m' MUST use AD4MAdapter` | MUST | Explicit selection. |
+| D-02 | `backend: 'living-web' MUST use LivingWebAdapter` | MUST | Explicit selection. |
+| D-03 | `backend: 'auto' with reachable executor MUST prefer AD4MAdapter` | MUST | AD4M takes priority. |
+| D-04 | `backend: 'auto' with unreachable executor but navigator.graph MUST fall back to LivingWebAdapter` | MUST | Graceful fallback. |
+| D-05 | `backend: 'auto' with neither available MUST throw` | MUST | Clear error, not silent failure. |
+
+---
+
 ## Layer 0: Declarative Data Foundation
+
+(Shapes, annotations, engine, transforms, pipelines — unchanged from previous plan revision. The engine now calls `GraphAdapter` methods instead of `navigator.graph` directly.)
 
 ### Shape Definitions (the source of truth)
 
-Each shape is a JSON definition with **annotations** — metadata that drives UI rendering, ICS mapping, validation, and default values. Annotations are *not* part of the Living Web shape spec — they are an Agenda-level extension stored alongside the definition.
+Each shape is a JSON definition with **annotations** — metadata that drives UI rendering, ICS mapping, validation, and default values. Annotations are Agenda-level, not part of the Living Web spec.
 
 #### `data/shapes/event.ts`
 
 ```typescript
-import type { ShapeDefinition } from '../engine/types'
+import type { ShapeDefinition } from '../../adapter/types'
 import type { ShapeAnnotations } from '../derivations/types'
 
-/** The Living Web shape — pure spec-level definition */
+/** The shape — pure spec-level definition */
 export const EVENT_SHAPE: ShapeDefinition = {
   targetClass: 'schema://Event',
   properties: [
@@ -163,7 +773,6 @@ export const EVENT_SHAPE: ShapeDefinition = {
 
 /** Agenda-level annotations — drives UI, validation, defaults, ICS mapping */
 export const EVENT_ANNOTATIONS: ShapeAnnotations = {
-  /** Display metadata per property */
   fields: {
     name:           { label: 'Title',       inputType: 'text',     group: 'primary', order: 0 },
     startDate:      { label: 'Start',       inputType: 'datetime', group: 'primary', order: 1 },
@@ -184,21 +793,14 @@ export const EVENT_ANNOTATIONS: ShapeAnnotations = {
     calendarId:     { label: 'Calendar',    inputType: 'calendar-select', group: 'primary', order: 12 },
     icsUid:         { label: 'ICS UID',     inputType: 'hidden',   group: 'system',  order: -1 },
   },
-
-  /** Declarative default values (applied when creating a new instance) */
   defaults: {
     status: 'EventScheduled',
     visibility: 'private',
-    // organizer: derived from navigator.credentials at runtime
   },
-
-  /** Declarative validation rules (beyond what the shape's cardinality enforces) */
   rules: [
     { type: 'comparison', field: 'endDate', operator: '>', referenceField: 'startDate',
       message: 'End date must be after start date' },
   ],
-
-  /** ICS field mapping — bidirectional, keyed by shape property name */
   icsMapping: {
     name:        'SUMMARY',
     startDate:   'DTSTART',
@@ -224,34 +826,29 @@ export interface ShapeAnnotations {
   fields: Record<string, FieldAnnotation>
   defaults: Record<string, string | number | boolean>
   rules: ValidationRule[]
-  icsMapping?: Record<string, string>     // shape property name → ICS property name
+  icsMapping?: Record<string, string>
 }
 
 export interface FieldAnnotation {
   label: string
   inputType: InputType
-  group: string                            // for grouping in UI (primary, details, people, system)
-  order: number                            // display order within group
-  options?: string[]                       // for select inputs
-  hidden?: boolean                         // hidden from user-facing forms
+  group: string
+  order: number
+  options?: string[]
 }
 
 export type InputType =
-  | 'text' | 'textarea' | 'url'            // string inputs
-  | 'datetime' | 'date' | 'time'           // temporal inputs
-  | 'duration'                              // ISO 8601 duration picker
-  | 'select'                                // enum dropdown
-  | 'rrule'                                 // recurrence rule builder
-  | 'did-list'                              // multi-DID selector
-  | 'calendar-select'                       // calendar chooser
-  | 'hidden'                                // not rendered
+  | 'text' | 'textarea' | 'url'
+  | 'datetime' | 'date' | 'time'
+  | 'duration' | 'select' | 'rrule'
+  | 'did-list' | 'calendar-select' | 'hidden'
 
 export interface ValidationRule {
   type: 'comparison' | 'pattern' | 'custom'
   field: string
   operator?: '>' | '<' | '>=' | '<=' | '==' | '!='
-  referenceField?: string                  // for cross-field comparison
-  pattern?: string                         // for regex validation
+  referenceField?: string
+  pattern?: string
   message: string
 }
 ```
@@ -266,7 +863,6 @@ export interface RegisteredShape {
   annotations: ShapeAnnotations
 }
 
-/** All shapes, keyed by name. The engine registers these on graph bootstrap. */
 export const SHAPE_REGISTRY: Record<string, RegisteredShape> = {
   Event:          { shape: EVENT_SHAPE,            annotations: EVENT_ANNOTATIONS },
   MeetingRequest: { shape: MEETING_REQUEST_SHAPE,  annotations: MEETING_REQUEST_ANNOTATIONS },
@@ -275,232 +871,30 @@ export const SHAPE_REGISTRY: Record<string, RegisteredShape> = {
 }
 ```
 
-### Generic Engine
-
-Shape-agnostic operations. These work on *any* registered shape.
+### Generic Engine (uses GraphAdapter)
 
 #### `data/engine/instance-ops.ts`
 
 ```typescript
 /**
- * Generic, shape-driven CRUD. No shape-specific code — operates
- * on any shape from the registry using its definition + annotations.
+ * Generic, shape-driven CRUD. Operates on any shape via the GraphAdapter.
+ * No shape-specific code. No backend-specific code.
  */
-
 export interface InstanceOps {
-  /**
-   * Create an instance of a shape.
-   * 1. Look up shape in registry
-   * 2. Apply declarative defaults from annotations
-   * 3. Run declarative validation rules
-   * 4. Generate URI (urn:<shape>:<uuid>)
-   * 5. Call graph.createShapeInstance()
-   */
+  /** Bootstrap: create/find graph, register all shapes from registry */
+  bootstrap(graphName: string): Promise<string>  // returns graphId
+
   create(shapeName: string, data: Record<string, unknown>): Promise<Record<string, unknown>>
-
-  /** Get instance data by URI */
   get(shapeName: string, uri: string): Promise<Record<string, unknown> | null>
-
-  /**
-   * Update instance properties.
-   * 1. For each key in patch: call graph.setShapeProperty() or collection ops
-   * 2. Re-validate after patch (run rules against merged data)
-   */
   update(shapeName: string, uri: string, patch: Record<string, unknown>): Promise<Record<string, unknown>>
-
-  /** Delete an instance (remove all its triples) */
   delete(shapeName: string, uri: string): Promise<boolean>
-
-  /** Query instances by filter parameters, derived from shape metadata */
   query(shapeName: string, filters: QueryFilters): Promise<Record<string, unknown>[]>
-}
-
-export interface QueryFilters {
-  /** Property equality filters — keys are shape property names */
-  where?: Record<string, string | string[]>
-  /** Temporal range filter (for properties with datatype 'dateTime') */
-  dateRange?: { property: string; start: string; end: string }
-  /** Max results */
-  limit?: number
-}
-```
-
-#### `data/engine/query-builder.ts`
-
-```typescript
-/**
- * Builds graph queries from shape metadata + filter parameters.
- * The shape definition tells us which predicates to query;
- * the filters tell us what values to match.
- */
-
-export function buildQuery(
-  shape: ShapeDefinition,
-  filters: QueryFilters,
-): TripleQuery | string  // returns TripleQuery for simple filters, SPARQL string for complex
-```
-
-#### `data/engine/graph-context.ts`
-
-```typescript
-/**
- * Bootstrap:
- * 1. navigator.graph.create("My Calendar") or find existing
- * 2. For each shape in SHAPE_REGISTRY: graph.addShape(name, JSON.stringify(shape))
- * 3. Provide graph + InstanceOps to the component tree via SolidJS context
- */
-```
-
-### Declarative ICS Mapping
-
-No per-field conversion functions. The mapping table drives both import and export.
-
-#### `data/derivations/ics-mapping.ts`
-
-```typescript
-/**
- * Generic ICS ↔ shape mapping, driven entirely by the icsMapping annotation.
- *
- * Import: for each VEVENT property, look up which shape property it maps to.
- * Export: for each shape property, look up which ICS property to emit.
- *
- * Datatype conversion is derived from the shape property's datatype:
- *   'dateTime' → ICS datetime format conversion
- *   'string'   → direct passthrough
- *
- * No per-field code.
- */
-
-export function importVEvent(
-  vevent: ICALComponent,
-  mapping: Record<string, string>,
-  shape: ShapeDefinition,
-): Record<string, unknown>
-
-export function exportVEvent(
-  instance: Record<string, unknown>,
-  mapping: Record<string, string>,
-  shape: ShapeDefinition,
-): string
-```
-
-### Declarative Validation
-
-#### `data/derivations/validation-rules.ts`
-
-```typescript
-/**
- * Validate instance data against:
- * 1. Shape cardinality (minCount/maxCount) — derived from shape definition
- * 2. Shape datatypes — derived from shape definition
- * 3. Declarative rules from annotations (cross-field comparisons, patterns)
- *
- * Returns an array of validation errors (empty = valid).
- */
-
-export function validate(
-  shapeName: string,
-  data: Record<string, unknown>,
-  registry: Record<string, RegisteredShape>,
-): ValidationError[]
-
-export interface ValidationError {
-  field: string
-  rule: string
-  message: string
-}
-```
-
-### Transforms (Pure Functions)
-
-#### `data/transforms/rrule.ts`
-
-```typescript
-/** Parse RRULE string into structured options */
-export function parseRRule(rrule: string): RRuleOptions
-
-/** Expand a recurring event into concrete occurrences within a window */
-export function expandOccurrences(
-  rrule: string,
-  dtstart: string,
-  windowStart: string,
-  windowEnd: string,
-): Occurrence[]
-
-export interface Occurrence {
-  startDate: string
-  endDate: string
-  parentUri: string    // the recurring event this was expanded from
-  occurrenceIndex: number
-}
-```
-
-#### `data/transforms/freebusy-gen.ts`
-
-```typescript
-/**
- * Pure projection: events → free/busy slots.
- * Strips all event details — only produces time ranges + status.
- */
-export function eventsToFreeBusy(
-  events: Record<string, unknown>[],
-  windowStart: string,
-  windowEnd: string,
-): FreeBusySlot[]
-```
-
-#### `data/transforms/slot-finder.ts`
-
-```typescript
-/**
- * Pure function: given N participants' FreeBusy windows,
- * find the earliest mutually free slot of a given duration.
- */
-export function findFreeSlot(
-  participants: FreeBusySlot[][],
-  durationMinutes: number,
-  searchStart: string,
-  searchEnd: string,
-): { start: string; end: string } | null
-```
-
-### Pipelines (Composed Chains)
-
-#### `data/pipelines/visible-events.ts`
-
-```typescript
-/**
- * The main data pipeline for the calendar UI.
- *
- * Pipeline:
- *   1. query(Event, { dateRange: { property: 'startDate', start, end } })
- *   2. → for each with recurrence: expandOccurrences()
- *   3. → filter by visibleCalendars
- *   4. → sort by startDate
- *   5. → return
- *
- * Each step is a pure function. The pipeline is re-evaluated
- * reactively when view state changes (date range, visible calendars).
- */
-export function visibleEventsPipeline(
-  instanceOps: InstanceOps,
-  viewRange: { start: string; end: string },
-  visibleCalendars: Set<string>,
-): Promise<DisplayEvent[]>
-
-export interface DisplayEvent {
-  uri: string
-  parentUri?: string              // set for expanded recurrence occurrences
-  data: Record<string, unknown>   // shape instance data
-  calendarColor: string           // resolved from CalendarMeta
 }
 ```
 
 ---
 
 ## Layer 0 Tests
-
-All tests use Vitest. The test environment provides a mock `navigator.graph` — an in-memory implementation of the Living Web `PersonalGraph` interface (no AD4M executor needed).
 
 ```
 data/__tests__/
@@ -519,422 +913,121 @@ data/__tests__/
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| SC-01 | `Every shape in SHAPE_REGISTRY MUST have a targetClass` | MUST | All registered shapes MUST have a non-empty targetClass. |
-| SC-02 | `Every shape property MUST have a valid predicate URI (schema:// or agenda://)` | MUST | No bare strings or typos in predicate paths. |
-| SC-03 | `Every shape property MUST have a name matching [a-zA-Z_][a-zA-Z0-9_]*` | MUST | Per Living Web spec. |
-| SC-04 | `Shape property names MUST be unique within each shape` | MUST | No duplicate property names. |
-| SC-05 | `Constructor actions MUST reference only declared property names as targets` | MUST | Constructor target values that aren't literal URIs MUST correspond to a property name. |
-| SC-06 | `Every shape MUST have annotations in the registry` | MUST | Each RegisteredShape MUST have both shape and annotations. |
-| SC-07 | `Every shape property MUST have a corresponding field annotation` | MUST | The annotations.fields keys MUST be a superset of the shape property names. |
-| SC-08 | `Annotation defaults MUST only reference declared property names` | MUST | No defaults for non-existent properties. |
-| SC-09 | `Annotation validation rules MUST only reference declared property names` | MUST | Both field and referenceField MUST exist on the shape. |
-| SC-10 | `ICS mapping keys MUST only reference declared property names` | MUST | No orphan ICS mappings. |
+| SC-01 | `Every shape in SHAPE_REGISTRY MUST have a targetClass` | MUST | Non-empty targetClass on all shapes. |
+| SC-02 | `Every shape property MUST have a valid predicate URI (schema:// or agenda://)` | MUST | No typos in paths. |
+| SC-03 | `Every shape property MUST have a name matching [a-zA-Z_][a-zA-Z0-9_]*` | MUST | Per spec. |
+| SC-04 | `Shape property names MUST be unique within each shape` | MUST | No duplicates. |
+| SC-05 | `Constructor actions MUST reference only declared property names as targets` | MUST | No orphan references. |
+| SC-06 | `Every shape MUST have annotations in the registry` | MUST | Both shape and annotations present. |
+| SC-07 | `Every shape property MUST have a corresponding field annotation` | MUST | Annotations cover all properties. |
+| SC-08 | `Annotation defaults MUST only reference declared property names` | MUST | No phantom defaults. |
+| SC-09 | `Annotation validation rules MUST only reference declared property names` | MUST | Both field and referenceField exist. |
+| SC-10 | `ICS mapping keys MUST only reference declared property names` | MUST | No orphan mappings. |
 
-### `instance-ops.test.ts` — Generic CRUD
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| IO-01 | `create() MUST generate a unique URI for every instance` | MUST | Two calls with identical data MUST produce different URIs. |
-| IO-02 | `create() MUST apply declarative defaults from annotations` | MUST | Creating an Event without status MUST result in `status: 'EventScheduled'`. |
-| IO-03 | `create() MUST reject if a required property (minCount ≥ 1) is missing` | MUST | Omitting `name` on an Event MUST throw a validation error. |
-| IO-04 | `create() MUST run validation rules before persisting` | MUST | An Event with endDate before startDate MUST be rejected. |
-| IO-05 | `create() MUST call graph.createShapeInstance() with correct shape and data` | MUST | The mock graph MUST receive exactly the shape name, URI, and merged data. |
-| IO-06 | `get() MUST return instance data for a valid URI` | MUST | After create, get with the returned URI MUST return matching data. |
-| IO-07 | `get() MUST return null for an unknown URI` | MUST | Non-existent URI MUST return null, not throw. |
-| IO-08 | `update() MUST modify only the specified fields` | MUST | Updating `name` MUST NOT change `startDate` or other fields. |
-| IO-09 | `update() MUST re-validate after applying the patch` | MUST | Updating endDate to before startDate MUST be rejected. |
-| IO-10 | `update() MUST call the correct graph property operations` | MUST | Scalar properties → setShapeProperty. Collections → addToShapeCollection/removeFromShapeCollection. |
-| IO-11 | `delete() MUST remove all triples for the instance` | MUST | After delete, get MUST return null. |
-| IO-12 | `delete() MUST return true for existing, false for non-existent` | MUST | Matches graph.removeTriple semantics. |
-| IO-13 | `query() with dateRange MUST return instances overlapping the range` | MUST | Includes events starting before but ending within, fully within, and starting within but ending after. |
-| IO-14 | `query() with dateRange MUST NOT return instances outside the range` | MUST | Events ending before range start or starting after range end excluded. |
-| IO-15 | `query() with where filter MUST match by property value` | MUST | `where: { calendarId: 'work' }` returns only work calendar events. |
-| IO-16 | `create() MUST work for any shape in the registry (not just Event)` | MUST | Creating a MeetingRequest or FreeBusy MUST follow the same code path. |
-| IO-17 | `The InstanceOps interface MUST NOT contain any shape-specific methods` | MUST | No `createEvent()` or `createMeetingRequest()` — only generic `create(shapeName, data)`. |
-
-### `query-builder.test.ts` — Query Derivation
+### `instance-ops.test.ts` — Generic CRUD (runs against MockAdapter)
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| QB-01 | `buildQuery() MUST derive predicates from shape property paths` | MUST | A filter on `calendarId` MUST produce a query using the `agenda://calendarId` predicate. |
-| QB-02 | `buildQuery() with dateRange MUST produce a temporal range query` | MUST | dateRange on `startDate` MUST constrain by `schema://startDate`. |
-| QB-03 | `buildQuery() with multiple filters MUST combine them with AND` | MUST | `where: { calendarId: 'work' }` + `dateRange` MUST intersect. |
-| QB-04 | `buildQuery() MUST handle collection properties (no maxCount)` | MUST | Filtering on `attendees` MUST match any value in the collection. |
+| IO-01 | `create() MUST generate a unique URI for every instance` | MUST | Two identical creates → different URIs. |
+| IO-02 | `create() MUST apply declarative defaults from annotations` | MUST | Event without status → `EventScheduled`. |
+| IO-03 | `create() MUST reject if a required property (minCount ≥ 1) is missing` | MUST | Omitting `name` → error. |
+| IO-04 | `create() MUST run validation rules before persisting` | MUST | endDate < startDate → rejected. |
+| IO-05 | `create() MUST call adapter.createInstance() with correct args` | MUST | Mock receives shape name, URI, merged data. |
+| IO-06 | `get() MUST return instance data for a valid URI` | MUST | Round-trip: create → get → match. |
+| IO-07 | `get() MUST return null for unknown URI` | MUST | Non-existent → null. |
+| IO-08 | `update() MUST modify only specified fields` | MUST | Update `name` → `startDate` unchanged. |
+| IO-09 | `update() MUST re-validate after patch` | MUST | endDate < startDate after patch → rejected. |
+| IO-10 | `update() MUST call correct adapter operations per property cardinality` | MUST | Scalar → setProperty. Collection → addToCollection/removeFromCollection. |
+| IO-11 | `delete() MUST remove instance` | MUST | After delete, get → null. |
+| IO-12 | `delete() MUST return true/false correctly` | MUST | Exists → true, not exists → false. |
+| IO-13 | `query() with dateRange MUST return overlapping instances` | MUST | Standard range overlap semantics. |
+| IO-14 | `query() with dateRange MUST NOT return outside instances` | MUST | Before/after range → excluded. |
+| IO-15 | `query() with where MUST filter by property value` | MUST | `calendarId: 'work'` → only work events. |
+| IO-16 | `create() MUST work for any shape in registry` | MUST | MeetingRequest and FreeBusy follow same path. |
+| IO-17 | `InstanceOps MUST NOT contain shape-specific methods` | MUST | Generic only. |
 
 ### `validation.test.ts` — Declarative Validation
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| VL-01 | `validate() MUST check minCount for required properties` | MUST | Missing `name` → error on `name` field. |
-| VL-02 | `validate() MUST check datatype constraints` | MUST | Non-datetime string for `startDate` → error. |
-| VL-03 | `validate() MUST evaluate comparison rules` | MUST | `endDate <= startDate` → error with the rule's message. |
-| VL-04 | `validate() MUST return empty array when all valid` | MUST | A fully valid Event → `[]`. |
-| VL-05 | `validate() MUST work for any shape (not just Event)` | MUST | MeetingRequest with missing `from` → error. |
-| VL-06 | `validate() MUST evaluate rules ONLY from annotations (no hardcoded logic)` | MUST | Adding a new rule to annotations MUST be enforced without code changes. |
+| VL-01 | `validate() MUST check minCount for required properties` | MUST | Missing `name` → error. |
+| VL-02 | `validate() MUST check datatype constraints` | MUST | Non-datetime for `startDate` → error. |
+| VL-03 | `validate() MUST evaluate comparison rules` | MUST | endDate ≤ startDate → error. |
+| VL-04 | `validate() MUST return empty array when valid` | MUST | Good data → `[]`. |
+| VL-05 | `validate() MUST work for any shape` | MUST | Not Event-specific. |
+| VL-06 | `Adding a rule to annotations MUST be enforced without code changes` | MUST | Declarative extensibility. |
 
 ### `ics.test.ts` — Declarative ICS Mapping
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| I-01 | `importVEvent() MUST map ICS fields to shape properties using the icsMapping table` | MUST | SUMMARY → name, DTSTART → startDate, etc. — all driven by the table. |
-| I-02 | `importVEvent() MUST convert ICS datetime to ISO 8601` | MUST | ICS `20260407T100000Z` → `2026-04-07T10:00:00Z`. |
-| I-03 | `importVEvent() MUST ignore ICS fields not in the mapping` | MUST | Unmapped ICS properties MUST be silently dropped. |
-| I-04 | `importVEvent() MUST handle multiple VEVENTs` | MUST | N VEVENTs → N instance data records. |
-| I-05 | `exportVEvent() MUST map shape properties to ICS fields using the icsMapping table` | MUST | name → SUMMARY, startDate → DTSTART, etc. |
-| I-06 | `exportVEvent() MUST produce valid iCalendar output` | MUST | BEGIN:VCALENDAR … END:VCALENDAR, VERSION 2.0, PRODID. |
-| I-07 | `exportVEvent() MUST generate UID if icsUid is absent` | MUST | Every VEVENT MUST have a UID. |
-| I-08 | `importVEvent() → exportVEvent() MUST round-trip core fields` | MUST | Parse → export → re-parse MUST produce equivalent data. |
-| I-09 | `Adding a new field to the icsMapping MUST be sufficient to support it (no code change)` | MUST | This is the key declarative test: add a mapping entry, and import/export handles it. |
+| I-01 | `importVEvent() MUST map via icsMapping table` | MUST | Table-driven, not per-field. |
+| I-02 | `importVEvent() MUST convert ICS datetime to ISO 8601` | MUST | Format conversion. |
+| I-03 | `importVEvent() MUST ignore unmapped ICS fields` | MUST | Silent drop. |
+| I-04 | `importVEvent() MUST handle multiple VEVENTs` | MUST | N inputs → N outputs. |
+| I-05 | `exportVEvent() MUST map via icsMapping table` | MUST | Reverse direction. |
+| I-06 | `exportVEvent() MUST produce valid iCalendar` | MUST | Correct wrapper. |
+| I-07 | `exportVEvent() MUST generate UID if absent` | MUST | Every VEVENT needs UID. |
+| I-08 | `Round-trip MUST preserve core fields` | MUST | Import → export → import = equivalent. |
+| I-09 | `Adding a mapping entry MUST be sufficient (no code change)` | MUST | Key declarative test. |
 
 ### `rrule.test.ts` — Recurrence Expansion
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| R-01 | `parseRRule() MUST parse FREQ=DAILY` | MUST | Frequency extraction. |
-| R-02 | `parseRRule() MUST parse FREQ=WEEKLY with BYDAY` | MUST | e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`. |
-| R-03 | `parseRRule() MUST parse FREQ=MONTHLY` | MUST | Monthly recurrence. |
-| R-04 | `parseRRule() MUST parse FREQ=YEARLY` | MUST | Yearly recurrence. |
-| R-05 | `parseRRule() MUST parse INTERVAL` | MUST | e.g. `INTERVAL=2` for every other week. |
-| R-06 | `parseRRule() MUST parse COUNT` | MUST | Limit total occurrences. |
-| R-07 | `parseRRule() MUST parse UNTIL` | MUST | End date for recurrence. |
-| R-08 | `expandOccurrences() MUST generate correct dates for daily recurrence` | MUST | 7-day window with FREQ=DAILY → 7 occurrences. |
-| R-09 | `expandOccurrences() MUST generate correct dates for weekly with BYDAY` | MUST | 2-week window with BYDAY=MO,WE → 4 occurrences. |
-| R-10 | `expandOccurrences() MUST respect COUNT limit` | MUST | FREQ=DAILY;COUNT=3 → at most 3. |
-| R-11 | `expandOccurrences() MUST respect UNTIL limit` | MUST | No occurrences after UNTIL date. |
-| R-12 | `expandOccurrences() MUST NOT generate occurrences outside the query window` | MUST | Before windowStart or after windowEnd → excluded. |
-| R-13 | `expandOccurrences() MUST handle timezone offsets in DTSTART` | MUST | +10:00 offset → correct absolute times. |
-| R-14 | `expandOccurrences() SHOULD handle EXDATE` | SHOULD | Exception dates excluded from results. |
-| R-15 | `expandOccurrences() MUST set parentUri on each occurrence` | MUST | Occurrences MUST reference the source event for edits. |
+| R-01 | `parseRRule() MUST parse FREQ=DAILY` | MUST | |
+| R-02 | `parseRRule() MUST parse FREQ=WEEKLY with BYDAY` | MUST | |
+| R-03 | `parseRRule() MUST parse FREQ=MONTHLY` | MUST | |
+| R-04 | `parseRRule() MUST parse FREQ=YEARLY` | MUST | |
+| R-05 | `parseRRule() MUST parse INTERVAL` | MUST | |
+| R-06 | `parseRRule() MUST parse COUNT` | MUST | |
+| R-07 | `parseRRule() MUST parse UNTIL` | MUST | |
+| R-08 | `expandOccurrences() daily: 7-day window → 7 occurrences` | MUST | |
+| R-09 | `expandOccurrences() weekly BYDAY=MO,WE: 2 weeks → 4 occurrences` | MUST | |
+| R-10 | `expandOccurrences() MUST respect COUNT` | MUST | |
+| R-11 | `expandOccurrences() MUST respect UNTIL` | MUST | |
+| R-12 | `expandOccurrences() MUST NOT generate outside window` | MUST | |
+| R-13 | `expandOccurrences() MUST handle timezone offsets` | MUST | |
+| R-14 | `expandOccurrences() SHOULD handle EXDATE` | SHOULD | |
+| R-15 | `expandOccurrences() MUST set parentUri` | MUST | |
 
-### `freebusy.test.ts` — Free/Busy Generation
+### `freebusy.test.ts` / `slot-finder.test.ts` / `pipeline.test.ts`
 
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| F-01 | `eventsToFreeBusy() MUST produce busy slots for occupied time` | MUST | Event 10:00–11:00 → busy slot 10:00–11:00. |
-| F-02 | `eventsToFreeBusy() MUST produce free slots for unoccupied time` | MUST | Gap between events → free slot. |
-| F-03 | `eventsToFreeBusy() MUST NOT include any event details` | MUST | Only start, end, status. No name, description, location. |
-| F-04 | `eventsToFreeBusy() MUST handle overlapping events` | MUST | Two overlapping events → single merged busy slot. |
-| F-05 | `eventsToFreeBusy() MUST include expanded recurring occurrences` | MUST | Weekly event → busy slot per occurrence in window. |
-| F-06 | `eventsToFreeBusy() is a pure function (no graph access)` | MUST | Takes event data arrays as input, returns slots. No side effects. |
-
-### `slot-finder.test.ts` — Mutual Availability
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| SF-01 | `findFreeSlot() MUST return a slot where no participant is busy` | MUST | Returned slot MUST NOT overlap any busy slot. |
-| SF-02 | `findFreeSlot() MUST return the earliest possible slot` | MUST | First available slot from searchStart. |
-| SF-03 | `findFreeSlot() MUST return null when no slot exists` | MUST | All time occupied → null. |
-| SF-04 | `findFreeSlot() MUST respect the requested duration` | MUST | Slot duration ≥ requested minutes. |
-| SF-05 | `findFreeSlot() is a pure function (no graph access)` | MUST | Takes arrays of slots, returns result. No side effects. |
-
-### `pipeline.test.ts` — Composed Pipeline
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| P-01 | `visibleEventsPipeline() MUST query, expand recurrences, and filter by calendar` | MUST | End-to-end: create events (some recurring, multiple calendars) → pipeline returns only visible, expanded results. |
-| P-02 | `visibleEventsPipeline() MUST sort results by startDate ascending` | MUST | Output MUST be chronologically ordered. |
-| P-03 | `visibleEventsPipeline() MUST include calendarColor resolved from CalendarMeta` | MUST | Each DisplayEvent MUST have a color. |
-| P-04 | `Changing visible calendars MUST change pipeline output (no re-query needed)` | MUST | The filter step operates on in-memory data, not a new graph query. |
-| P-05 | `Pipeline MUST be composable from independent pure functions` | MUST | Each stage (query, expand, filter, sort) MUST be independently testable and replaceable. |
+(Unchanged from previous revision — pure functions, no adapter dependency.)
 
 ---
 
-## Layer 1: Personal Calendar UI
+## Layer 1–5 Tests
 
-SolidJS components consuming the pipeline output. The key declarative element: **`ShapeForm` renders any shape**, and `EventDetail` is just `ShapeForm` with the Event shape and its annotations.
-
-### Shape-Driven Forms
-
-```typescript
-/** ui/forms/ShapeForm.tsx */
-
-/**
- * Renders a form for any registered shape.
- *
- * 1. Reads shape properties from the definition
- * 2. Groups and orders fields using annotations
- * 3. Dispatches each field to FieldRenderer based on inputType
- * 4. Validates on submit using declarative rules
- *
- * No shape-specific code in this component.
- */
-interface ShapeFormProps {
-  shapeName: string
-  data?: Record<string, unknown>          // existing data (for edit mode)
-  onSubmit: (data: Record<string, unknown>) => void
-  onCancel?: () => void
-  groups?: string[]                       // which groups to render (default: all non-system)
-}
-```
-
-```typescript
-/** ui/forms/field-registry.ts */
-
-/**
- * Declarative mapping: inputType → component.
- * Adding a new input type = registering one entry here + writing the component.
- */
-export const FIELD_COMPONENTS: Record<InputType, Component<FieldProps>> = {
-  text:            TextInput,
-  textarea:        TextareaInput,
-  url:             UrlInput,
-  datetime:        DateTimeInput,
-  date:            DateInput,
-  time:            TimeInput,
-  duration:        DurationInput,
-  select:          SelectInput,
-  rrule:           RRuleInput,
-  'did-list':      DIDListInput,
-  'calendar-select': CalendarSelectInput,
-  hidden:          HiddenInput,
-}
-```
-
-### Layer 1 Tests (Playwright E2E)
-
-```
-tests/
-├── views.spec.ts
-├── events.spec.ts
-├── shape-form.spec.ts
-├── calendar-management.spec.ts
-└── ics-import.spec.ts
-```
-
-#### `views.spec.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| V-01 | `Week view MUST render 7 day columns` | MUST | Default view shows Mon–Sun columns. |
-| V-02 | `Week view MUST render hour slots 00:00–23:00` | MUST | 24 hours visible when scrolling. |
-| V-03 | `Day view MUST render a single day column` | MUST | Switch to day → one column. |
-| V-04 | `Month view MUST render a calendar grid of 4–6 weeks` | MUST | Standard month grid. |
-| V-05 | `Agenda view MUST render events in chronological order` | MUST | List sorted by start time. |
-| V-06 | `View toggle MUST switch between all four views` | MUST | All buttons functional. |
-| V-07 | `Today button MUST navigate to current date` | MUST | Returns to today after navigation. |
-| V-08 | `Navigation arrows MUST advance/retreat by view unit` | MUST | Week → ±7 days, month → ±1 month, day → ±1 day. |
-
-#### `events.spec.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| E-01 | `Clicking empty time slot MUST open quick-create` | MUST | Pre-fills clicked time. |
-| E-02 | `Quick-create MUST create an event visible on the grid` | MUST | Type name, confirm → event appears. |
-| E-03 | `Clicking event block MUST open detail panel` | MUST | Shows all fields. |
-| E-04 | `Saving edits MUST update the grid` | MUST | Changed name/time reflected immediately. |
-| E-05 | `Deleting MUST remove from grid` | MUST | Event block disappears. |
-| E-06 | `Events MUST be positioned by time on the grid` | MUST | 10:00–11:00 → 10am row, 1hr span. |
-| E-07 | `Events MUST be colored by calendar` | MUST | Different calendars → different colors. |
-| E-08 | `Recurring events MUST show each occurrence` | MUST | Weekly event → block per week in view. |
-
-#### `shape-form.spec.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| SF-01 | `ShapeForm MUST render fields from shape annotations` | MUST | Every non-hidden field annotation MUST produce a form input. |
-| SF-02 | `ShapeForm MUST group fields by annotation group` | MUST | Primary group fields render together, details group together. |
-| SF-03 | `ShapeForm MUST order fields by annotation order` | MUST | Lower order values render first. |
-| SF-04 | `ShapeForm MUST dispatch to correct input component by inputType` | MUST | datetime → DateTimeInput, select → SelectInput, etc. |
-| SF-05 | `ShapeForm MUST show validation errors from declarative rules` | MUST | endDate < startDate → error message from the rule. |
-| SF-06 | `ShapeForm MUST work for any registered shape` | MUST | Render with MeetingRequest or CalendarMeta → correct form. |
-
-#### `calendar-management.spec.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| C-01 | `Sidebar MUST list all calendars` | MUST | At least one on first run. |
-| C-02 | `Creating a new calendar MUST add it to sidebar` | MUST | Immediate appearance. |
-| C-03 | `Toggling visibility MUST show/hide events` | MUST | Uncheck → events gone, re-check → restored. |
-| C-04 | `Calendar color MUST be reflected on events` | MUST | Color change → events update. |
-
-#### `ics-import.spec.ts`
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| IC-01 | `Dropping .ics file MUST trigger import` | MUST | Drag-and-drop → events created. |
-| IC-02 | `Import MUST create events for each VEVENT` | MUST | 5 VEVENTs → 5 events. |
-| IC-03 | `Imported events MUST appear on the grid` | MUST | Visible at correct times. |
-| IC-04 | `Invalid file MUST show error` | MUST | Non-ICS → user-facing error. |
+(Unchanged from previous revision — UI, scheduling state machine, governance table, NL patterns.)
 
 ---
 
-## Layer 2: Meeting Requests (State Machine)
-
-The request lifecycle is a declarative state machine, not imperative method calls.
-
-### `scheduling/request-transitions.ts`
-
-```typescript
-/**
- * Declarative state machine for meeting request status transitions.
- * Each transition defines: fromState → toState, required fields, side effects.
- */
-
-export interface Transition {
-  from: RequestStatus
-  to: RequestStatus
-  requiredFields?: string[]                // fields that MUST be set during this transition
-  sideEffects?: SideEffect[]               // declarative descriptions of what happens
-}
-
-export type SideEffect =
-  | { type: 'createInstance'; shape: string; in: 'personal' | 'shared' }
-  | { type: 'updateInstance'; shape: string; in: 'personal' | 'shared' }
-
-export const REQUEST_TRANSITIONS: Transition[] = [
-  { from: 'pending', to: 'accepted',
-    sideEffects: [
-      { type: 'createInstance', shape: 'Event', in: 'personal' },
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-  { from: 'pending', to: 'declined',
-    sideEffects: [
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-  { from: 'pending', to: 'tentative',
-    sideEffects: [
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-  { from: 'pending', to: 'counter',
-    requiredFields: ['counterStart', 'counterEnd'],
-    sideEffects: [
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-  { from: 'counter', to: 'accepted',
-    sideEffects: [
-      { type: 'createInstance', shape: 'Event', in: 'personal' },
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-  { from: 'counter', to: 'declined',
-    sideEffects: [
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-  { from: 'counter', to: 'counter',
-    requiredFields: ['counterStart', 'counterEnd'],
-    sideEffects: [
-      { type: 'updateInstance', shape: 'MeetingRequest', in: 'shared' },
-    ] },
-]
-```
-
-### Layer 2 Tests
+## Declarative Invariant Tests
 
 | # | Test | Level | Description |
 |---|------|-------|-------------|
-| M-01 | `Transition pending→accepted MUST be in REQUEST_TRANSITIONS` | MUST | Valid transition. |
-| M-02 | `Transition pending→counter MUST require counterStart and counterEnd` | MUST | Missing fields → rejected. |
-| M-03 | `Transition accepted→pending MUST NOT be in REQUEST_TRANSITIONS` | MUST | Invalid backward transition. |
-| M-04 | `Executing pending→accepted MUST create Event in personal graph` | MUST | Side effect fires. |
-| M-05 | `Executing pending→accepted MUST update MeetingRequest in shared graph` | MUST | Side effect fires. |
-| M-06 | `Executing pending→declined MUST NOT create Event in personal graph` | MUST | No Event side effect. |
-| M-07 | `All transitions MUST reference shapes that exist in SHAPE_REGISTRY` | MUST | No orphan shape references. |
-| M-08 | `Initiating a request MUST create a shared graph containing MeetingRequest` | MUST | Shape registered, instance created with status 'pending'. |
-| M-09 | `Transition counter→counter MUST allow re-negotiation` | MUST | Multiple counter-proposals permitted. |
-
----
-
-## Layer 4: Shared Calendars + Governance
-
-### `shared/governance-rules.ts`
-
-```typescript
-/**
- * Declarative role → permission mapping.
- * The governance engine reads this table — no if/else permission checking.
- */
-export const ROLE_PERMISSIONS: Record<string, Set<string>> = {
-  admin:  new Set(['create', 'edit', 'delete', 'grant-role', 'revoke-role']),
-  editor: new Set(['create', 'edit']),
-  viewer: new Set([]),
-}
-
-/**
- * Check permission by table lookup.
- */
-export function canPerform(role: string, action: string): boolean {
-  return ROLE_PERMISSIONS[role]?.has(action) ?? false
-}
-```
-
-### Layer 4 Tests
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| SH-01 | `createSharedCalendar() MUST register Event shape on shared graph` | MUST | Shape exists after creation. |
-| SH-02 | `createSharedCalendar() MUST return a share URL` | MUST | URL usable for joining. |
-| SH-03 | `Events created by member A MUST be queryable by member B` | MUST | Shared graph sync. |
-| SH-04 | `Creator MUST automatically receive admin role` | MUST | Governance triple set on creation. |
-| G-01 | `ROLE_PERMISSIONS admin MUST include create, edit, delete, grant-role, revoke-role` | MUST | Table correctness. |
-| G-02 | `ROLE_PERMISSIONS editor MUST include create, edit but NOT delete` | MUST | Table correctness. |
-| G-03 | `ROLE_PERMISSIONS viewer MUST include nothing` | MUST | Read-only. |
-| G-04 | `canPerform() MUST return false for unknown roles` | MUST | Fail-closed. |
-| G-05 | `Adding a new role to ROLE_PERMISSIONS MUST be sufficient (no code change)` | MUST | The key declarative test. |
-
----
-
-## Layer 5: Onboarding
-
-### `onboarding/natural-language.ts`
-
-```typescript
-/**
- * Pattern-based parser. Rules are declared as patterns, not procedural code.
- */
-export interface NLPattern {
-  pattern: RegExp
-  extract: Record<string, number>          // shape property name → capture group index
-  transform?: Record<string, (raw: string, refDate: string) => string>
-}
-
-export const NL_PATTERNS: NLPattern[] = [
-  {
-    pattern: /^(.+?)\s+(?:at|@)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*$/i,
-    extract: { name: 1, startDate: 2 },
-    transform: { startDate: parseTimeRelative },
-  },
-  // ... more patterns
-]
-```
-
-### Layer 5 Tests
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| NL-01 | `"Coffee tomorrow at 10am" MUST parse name and startDate` | MUST | Pattern match + time resolution. |
-| NL-02 | `"Meeting with Nico 3pm-4pm Friday" MUST parse name, start, end` | MUST | Range pattern. |
-| NL-03 | `"Dentist next Tuesday" MUST parse name and date` | MUST | Relative date resolution. |
-| NL-04 | `Unparseable input MUST return null` | MUST | No match → null, not throw. |
-| NL-05 | `Adding a new NL_PATTERN MUST be sufficient to handle new formats (no code change)` | MUST | Declarative extensibility. |
-
----
-
-## Test Infrastructure
-
-### Mock Graph Backend
-
-In-memory implementation of the Living Web `PersonalGraph` / `PersonalGraphManager` interface. Shape-aware: validates against registered shape definitions.
-
-### Declarative Invariant Tests
-
-In addition to the per-module tests above, a suite of *structural invariant tests* verifies the declarative properties hold:
-
-| # | Test | Level | Description |
-|---|------|-------|-------------|
-| D-01 | `No module outside data/shapes/ may contain a predicate URI string literal` | MUST | Predicates come from shape definitions only. |
-| D-02 | `No module outside data/derivations/ may contain hardcoded default values` | MUST | Defaults come from annotations only. |
-| D-03 | `instance-ops.ts MUST NOT import any specific shape definition` | MUST | It reads from the registry, never from `event.ts` directly. |
-| D-04 | `ShapeForm.tsx MUST NOT import any specific shape definition` | MUST | It reads from the registry via context. |
-| D-05 | `Every ICS field mapping MUST be testable by adding one table entry` | MUST | No per-field conversion functions. |
+| DI-01 | `No module outside data/shapes/ may contain a predicate URI string literal` | MUST | Predicates come from shapes only. |
+| DI-02 | `No module outside data/derivations/ may contain hardcoded default values` | MUST | Defaults from annotations only. |
+| DI-03 | `instance-ops.ts MUST NOT import any specific shape definition` | MUST | Reads from registry. |
+| DI-04 | `ShapeForm.tsx MUST NOT import any specific shape definition` | MUST | Reads from context. |
+| DI-05 | `Every ICS field mapping MUST be testable by adding one table entry` | MUST | No per-field functions. |
+| DI-06 | `No module outside adapter/ may import LivingWebAdapter or AD4MAdapter directly` | MUST | Everything goes through the GraphAdapter interface. |
+| DI-07 | `Engine and UI layers MUST only depend on adapter/types.ts, never on adapter implementations` | MUST | Import boundary enforcement. |
 
 ---
 
 ## Implementation Order
 
-1. **Layer 0** — Shapes, annotations, engine, transforms, pipelines. All unit tests green.
-2. **Layer 1** — Shape-driven UI: ShapeForm, views, event blocks. E2E tests green.
-3. **Layer 2** — State machine for meeting requests. Unit tests green.
-4. **Layer 3** (Free/busy transforms are already in Layer 0 — this layer adds the publishing/overlay UI).
-5. **Layer 4** — Shared calendars + governance table. Unit tests green.
-6. **Layer 5** — NL patterns, import wizard. Unit tests green.
+1. **Adapter layer** — `GraphAdapter` interface + `MockAdapter`. Conformance tests green.
+2. **Layer 0** — Shapes, annotations, engine (using MockAdapter), transforms, pipelines. Unit tests green.
+3. **`LivingWebAdapter`** — implement + pass conformance tests.
+4. **`AD4MAdapter`** — implement + pass conformance tests.
+5. **`detect.ts`** — auto-detection logic + tests.
+6. **Layer 1** — Shape-driven UI. E2E tests green (against MockAdapter).
+7. **Layer 2** — Meeting request state machine. Unit tests green.
+8. **Layer 3** — Free/busy overlay UI (transforms already in Layer 0).
+9. **Layer 4** — Shared calendars + governance table. Unit tests green.
+10. **Layer 5** — NL patterns, import wizard. Unit tests green.
 
-Each layer is a milestone. No layer starts until the previous one's tests are green.
+Each milestone is testable independently. The adapter conformance suite runs against all three backends as they're implemented.
