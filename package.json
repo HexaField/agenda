@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check": "tsc --noEmit && oxlint",
     "test": "playwright test",
+    "test:unit": "vitest run",
     "lint": "oxlint --fix",
     "format": "oxfmt --write",
     "storybook": "storybook dev -p 6006",
@@ -16,6 +17,8 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@coasys/ad4m": "link:/Users/josh/workspaces/coasys/ad4m-sparql/core",
+    "ical.js": "^2.2.1",
     "solid-js": "^1.9.12"
   },
   "devDependencies": {
@@ -34,7 +37,8 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.3",
-    "vite-plugin-solid": "^2.11.12"
+    "vite-plugin-solid": "^2.11.12",
+    "vitest": "^4.1.2"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [
