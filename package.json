@@ -1,22 +1,40 @@
 {
   "name": "agenda",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @agenda/client dev",
-    "build": "pnpm -r --if-present build",
-    "test": "pnpm -r test",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "tsc --noEmit && oxlint",
+    "test": "playwright test",
     "lint": "oxlint --fix",
     "format": "oxfmt --write",
-    "check": "pnpm -r check && oxlint",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
     "prepare": "husky"
   },
+  "dependencies": {
+    "solid-js": "^1.9.12"
+  },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@storybook/addon-essentials": "^8.6.14",
+    "@storybook/addon-interactions": "^8.6.14",
+    "@storybook/addon-links": "^10.3.4",
+    "@storybook/blocks": "^8.6.14",
+    "@tailwindcss/vite": "^4.2.2",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
     "oxfmt": "^0.43.0",
     "oxlint": "^1.58.0",
-    "typescript": "^6.0.2"
+    "storybook": "^10.3.4",
+    "storybook-solidjs-vite": "^10.0.12",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3",
+    "vite-plugin-solid": "^2.11.12"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [

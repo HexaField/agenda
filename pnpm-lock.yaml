@@ -7,7 +7,29 @@ settings:
 importers:
 
   .:
+    dependencies:
+      solid-js:
+        specifier: ^1.9.12
+        version: 1.9.12
     devDependencies:
+      '@playwright/test':
+        specifier: ^1.59.1
+        version: 1.59.1
+      '@storybook/addon-essentials':
+        specifier: ^8.6.14
+        version: 8.6.14(@types/react@19.2.14)(storybook@10.3.4(@testing-library/dom@10.4.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))
+      '@storybook/addon-interactions':
+        specifier: ^8.6.14
+        version: 8.6.14(storybook@10.3.4(@testing-library/dom@10.4.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))
+      '@storybook/addon-links':
+        specifier: ^10.3.4
+        version: 10.3.4(react@19.2.4)(storybook@10.3.4(@testing-library/dom@10.4.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))
+      '@storybook/blocks':
+        specifier: ^8.6.14
+        version: 8.6.14(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(storybook@10.3.4(@testing-library/dom@10.4.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))
+      '@tailwindcss/vite':
+        specifier: ^4.2.2
+        version: 4.2.2(vite@8.0.3(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(esbuild@0.27.7)(jiti@2.6.1)(yaml@2.8.3))
       husky:
         specifier: ^9.1.7
         version: 9.1.7
@@ -20,9 +42,24 @@ importers:
       oxlint:
         specifier: ^1.58.0
         version: 1.58.0
+      storybook:
+        specifier: ^10.3.4
+        version: 10.3.4(@testing-library/dom@10.4.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      storybook-solidjs-vite:
+        specifier: ^10.0.12
+        version: 10.0.12(@testing-library/jest-dom@6.9.1)(esbuild@0.27.7)(rollup@4.60.1)(solid-js@1.9.12)(storybook@10.3.4(@testing-library/dom@10.4.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@6.0.2)(vite@8.0.3(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(esbuild@0.27.7)(jiti@2.6.1)(yaml@2.8.3))
+      tailwindcss:
+        specifier: ^4.2.2
+        version: 4.2.2
       typescript:
         specifier: ^6.0.2
         version: 6.0.2
+      vite:
+        specifier: ^8.0.3
+        version: 8.0.3(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(esbuild@0.27.7)(jiti@2.6.1)(yaml@2.8.3)
+      vite-plugin-solid:
+        specifier: ^2.11.12
+        version: 2.11.12(@testing-library/jest-dom@6.9.1)(solid-js@1.9.12)(vite@8.0.3(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(esbuild@0.27.7)(jiti@2.6.1)(yaml@2.8.3))
 
   packages/client:
     dependencies:

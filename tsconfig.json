@@ -17,6 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
     "esModuleInterop": true,
-    "jsx": "preserve"
-  }
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js"
+  },
+  "include": ["src"]
 }
